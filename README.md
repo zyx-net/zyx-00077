@@ -1,57 +1,285 @@
-# React + TypeScript + Vite
+# 排班考勤异常对账分析工具
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+一款基于 React + TypeScript 的企业级考勤异常分析工具，支持导入排班表、打卡记录和调休配置，智能识别迟到、早退、缺卡、跨日班次、调休抵扣、重复打卡等异常，并提供人工修正、规则版本管理、回滚能力和多格式报告导出。
 
-Currently, two official plugins are available:
+---
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## ✨ 功能特性
 
-## Expanding the ESLint configuration
+### 核心功能
+- **📊 多维度异常检测**：支持迟到、早退、缺卡、缺上班卡、缺下班卡、跨日班次、重复打卡、调休抵扣、时区错误等 9 种异常类型
+- **🔄 规则版本管理**：检测规则可配置，支持版本历史记录和一键回滚
+- **✏️ 人工修正与撤回**：支持标记正常、忽略、确认、调整时间、补卡等多种修正方式，所有修正可撤回
+- **📈 统计分析仪表盘**：按员工、部门、日期、异常类型多维度统计
+- **📋 多格式报告导出**：支持 HTML、Markdown、Excel、CSV 四种格式
+- **💾 本地持久化**：基于 IndexedDB，重启后批次、原始数据、修正规则完整保留
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+### 技术亮点
+- 六大核心模块完全分离：导入、匹配、规则、修正、统计、导出
+- 端到端类型安全：完整的 TypeScript 类型定义
+- 浏览器内数据库：IndexedDB 存储，无需后端服务
+- 响应式设计：适配桌面端和移动端
 
-```js
-export default tseslint.config({
-  extends: [
-    // Remove ...tseslint.configs.recommended and replace with this
-    ...tseslint.configs.recommendedTypeChecked,
-    // Alternatively, use this for stricter rules
-    ...tseslint.configs.strictTypeChecked,
-    // Optionally, add this for stylistic rules
-    ...tseslint.configs.stylisticTypeChecked,
-  ],
-  languageOptions: {
-    // other options...
-    parserOptions: {
-      project: ['./tsconfig.node.json', './tsconfig.app.json'],
-      tsconfigRootDir: import.meta.dirname,
-    },
-  },
-})
+---
+
+## 📁 样例数据说明
+
+所有样例数据位于 [public/sample-data/](file:///d:/workSpace/AI__SPACE/zyx-00077/public/sample-data/) 目录下。
+
+### 正常场景数据
+| 文件 | 路径 | 说明 |
+|------|------|------|
+| 排班表 | `normal/schedule.csv` | 5 名员工 × 3 天的正常排班数据 |
+| 打卡记录 | `normal/punch.csv` | 包含迟到、早退、缺卡等异常场景的打卡记录 |
+| 调休配置 | `normal/leave.csv` | 调休记录配置 |
+
+### 失败路径复现数据
+
+#### 1. 缺员工编号列
+- **路径**：`error-missing-employee-id/schedule.csv`
+- **场景**：排班表缺少「员工编号」必填列
+- **预期**：导入时检测到字段缺失，提示错误
+
+#### 2. 错误时区配置
+- **路径**：
+  - `error-timezone/punch.csv` - UTC 时区的打卡记录
+  - `error-config/timezone-config.json` - 错误时区配置（UTC）
+  - `error-config/correct-config.json` - 正确时区配置（Asia/Shanghai）
+- **场景**：时区配置错误导致打卡时间计算偏移
+- **预期**：使用错误配置时异常检测结果异常，切换为正确配置后恢复正常
+
+#### 3. 夜班跨日班次
+- **路径**：
+  - `cross-day-shift/schedule.csv` - 22:00-06:00 夜班排班
+  - `cross-day-shift/punch.csv` - 跨日打卡记录
+- **场景**：夜班班次跨越零点，打卡日期与排班日期不同
+- **预期**：正确识别跨日班次，准确计算迟到/早退时间
+
+#### 4. 同窗口重复打卡
+- **路径**：`duplicate-punch/punch.csv`
+- **场景**：5 分钟内同一员工多次打卡
+- **预期**：自动去重，上班保留最早打卡，下班保留最晚打卡
+
+---
+
+## 🔧 字段映射配置
+
+### 自动映射规则
+系统会自动根据表头名称识别字段映射，支持中英文别名：
+
+| 目标字段 | 支持的源列表头名称 |
+|----------|-------------------|
+| `employeeId` | 员工编号、工号、EmployeeID、emp_id |
+| `employeeName` | 员工姓名、姓名、Name、employee_name |
+| `department` | 部门、Department、dept |
+| `scheduleDate` | 日期、排班日期、ScheduleDate、date |
+| `startTime` | 上班时间、开始时间、StartTime、start |
+| `endTime` | 下班时间、结束时间、EndTime、end |
+| `punchTime` | 打卡时间、PunchTime、time |
+| `punchType` | 打卡类型、PunchType、type |
+
+### 手动调整映射
+在「数据导入」页面上传文件后，可以在「字段映射」步骤手动调整：
+1. 点击需要修改的目标字段下拉框
+2. 选择对应的源列表头
+3. 红色标记为必填字段，必须完成映射才能继续
+
+---
+
+## 📖 操作指南
+
+### 主流程：导入 → 异常识别 → 人工修正 → 导出报告
+
+#### 步骤 1：创建批次并导入数据
+1. 访问 http://localhost:5173/
+2. 点击左侧「数据导入」菜单
+3. 输入批次名称，选择时区（默认 Asia/Shanghai）
+4. 依次上传排班表、打卡记录、调休配置 CSV/Excel 文件
+5. 检查字段映射是否正确，红色为必填字段
+6. 点击「开始导入」等待数据处理完成
+
+#### 步骤 2：查看异常识别结果
+1. 导入完成后自动跳转至「异常分析」页面
+2. 查看所有识别出的异常记录
+3. 使用顶部筛选器按类型、状态、部门、员工筛选
+4. 点击单条异常查看详情
+
+#### 步骤 3：人工修正异常
+1. 在异常列表中找到需要修正的记录
+2. 点击「修正」按钮
+3. 选择修正类型：
+   - **标记为正常**：系统误报，实际正常
+   - **忽略**：特殊情况，忽略此异常
+   - **确认异常**：异常属实，无需修正
+   - **调整时间**：手动调整打卡时间
+   - **补卡**：补充缺失的打卡记录
+4. 填写修正原因，点击「确认修正」
+5. 异常状态更新，统计数据自动同步
+
+#### 步骤 4：撤回修正
+1. 在异常列表中找到已修正的记录（状态显示为「已修正」或「已忽略」）
+2. 点击「撤回修正」按钮
+3. 确认撤回操作
+4. 异常恢复为修正前状态，统计数据自动更新
+5. 修正历史记录保留，可在「修正历史」中查看
+
+#### 步骤 5：导出报告
+1. 点击左侧「统计报告」菜单
+2. 查看多维度统计图表和数据
+3. 选择导出格式（HTML / Markdown / Excel / CSV）
+4. 点击「导出报告」，文件自动下载
+
+---
+
+## 🐛 常见错误排查
+
+### 导入失败
+| 错误提示 | 原因 | 解决方案 |
+|----------|------|----------|
+| 缺少必填字段：员工编号 | 导入文件缺少员工编号列 | 检查 CSV/Excel 文件是否包含员工编号列，或在字段映射中正确映射 |
+| 日期格式解析失败 | 日期格式不规范 | 确保日期格式为 YYYY-MM-DD（如 2024-01-15） |
+| 时间格式解析失败 | 时间格式不规范 | 确保时间格式为 HH:mm 或 HH:mm:ss（如 09:00） |
+| 文件编码错误 | CSV 文件编码不是 UTF-8 | 将文件另存为 UTF-8 编码后重新上传 |
+
+### 异常检测不准确
+| 现象 | 可能原因 | 调整方式 |
+|------|----------|----------|
+| 迟到/早退检测太严格 | 宽限时间太短 | 进入「规则配置」页面，调整迟到/早退检测的宽限时间（默认 10 分钟） |
+| 跨日班次识别错误 | 班次类型设置错误 | 在排班数据中确保 shiftType 设置为 `crossDay` |
+| 重复打卡未去重 | 时间窗口设置太小 | 进入「规则配置」页面，调整重复打卡检测的时间窗口（默认 5 分钟） |
+
+### 修正撤回失败
+| 现象 | 可能原因 | 解决方案 |
+|------|----------|----------|
+| 撤回按钮灰色不可点击 | 该异常未被修正过 | 只有状态为「已修正」或「已忽略」的异常才能撤回 |
+| 撤回后统计未更新 | 页面缓存 | 刷新页面或重新选择批次 |
+| 撤回后报告未更新 | 报告未重新生成 | 重新进入「统计报告」页面导出新报告 |
+
+### 数据丢失
+| 现象 | 可能原因 | 解决方案 |
+|------|----------|----------|
+| 重启浏览器后批次消失 | 清除了浏览器数据 | IndexedDB 数据存储在浏览器中，请勿清除网站数据 |
+| 切换浏览器后数据不存在 | 数据按浏览器隔离 | IndexedDB 数据不跨浏览器同步，需在同一浏览器中使用 |
+
+---
+
+## 🏗️ 技术架构
+
+### 技术栈
+- **前端框架**：React 18 + TypeScript 5.8
+- **构建工具**：Vite 6.3
+- **状态管理**：Zustand 5.0
+- **路由管理**：React Router DOM 7.3
+- **UI 框架**：TailwindCSS 3.4 + Lucide React
+- **图表库**：Recharts 2.12
+- **文件处理**：PapaParse 5.4（CSV）、SheetJS 0.18（Excel）
+- **本地存储**：IndexedDB（idb 7.1 封装）
+- **测试框架**：Node.js test 模块 + tsx
+- **模拟数据库**：fake-indexeddb（测试环境）
+
+### 模块结构
+```
+src/
+├── modules/
+│   ├── import/          # 导入模块：CSV/Excel 解析、字段映射、数据校验
+│   ├── match/           # 匹配模块：排班与打卡智能匹配、跨日处理、去重
+│   ├── rules/           # 规则引擎：9 种异常检测、版本管理、回滚
+│   ├── correction/      # 修正模块：人工修正、历史追踪、撤回
+│   ├── stats/           # 统计模块：多维度统计分析
+│   └── export/          # 导出模块：HTML/Markdown/Excel/CSV 报告
+├── db/                  # IndexedDB 数据库封装
+├── store/               # Zustand 状态管理
+├── types/               # TypeScript 类型定义
+├── utils/               # 工具函数（日期时间等）
+├── pages/               # 页面组件
+├── components/          # 公共组件
+└── tests/               # 测试文件
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+### 数据模型
+- **Batch**：批次，一次导入分析的完整上下文
+- **ScheduleRecord**：排班记录
+- **PunchRecord**：打卡记录
+- **LeaveRecord**：调休记录
+- **Anomaly**：异常记录
+- **Correction**：修正记录（用于历史追溯和撤回）
+- **RuleVersion**：规则版本
+- **MatchedRecord**：排班与打卡匹配结果
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+---
 
-export default tseslint.config({
-  extends: [
-    // other configs...
-    // Enable lint rules for React
-    reactX.configs['recommended-typescript'],
-    // Enable lint rules for React DOM
-    reactDom.configs.recommended,
-  ],
-  languageOptions: {
-    // other options...
-    parserOptions: {
-      project: ['./tsconfig.node.json', './tsconfig.app.json'],
-      tsconfigRootDir: import.meta.dirname,
-    },
-  },
-})
+## 🚀 快速开始
+
+### 安装依赖
+```bash
+npm install
 ```
+
+### 启动开发服务器
+```bash
+npm run dev
+```
+访问 http://localhost:5173/
+
+### 运行测试
+```bash
+# 运行所有测试
+npm run test
+
+# 仅运行修正撤回回归测试
+npm run test -- src/tests/revert-correction.test.ts
+
+# 仅运行验收测试
+npm run test -- src/tests/acceptance.test.ts
+```
+
+### 类型检查
+```bash
+npm run check
+```
+
+### 生产构建
+```bash
+npm run build
+```
+构建产物输出到 `dist/` 目录。
+
+---
+
+## ✅ 可复现链路验证
+
+### 修正撤回完整流程
+按照以下步骤操作，可验证修正撤回功能端到端生效：
+
+1. **准备数据**：使用 `public/sample-data/normal/` 下的三个 CSV 文件
+2. **导入数据**：创建批次，依次上传排班表、打卡记录、调休配置
+3. **查看异常**：进入「异常分析」页面，记录初始异常数量（待处理 8 条）
+4. **导出报告**：进入「统计报告」，导出 Markdown 报告，记录「待处理: 8」
+5. **修正异常**：选择 2 条异常，分别「标记为正常」和「忽略」
+6. **验证统计**：确认异常列表中状态更新为「已修正」和「已忽略」，统计数据待处理变为 6 条
+7. **再次导出**：重新导出报告，确认「待处理: 6, 已修正: 1, 已忽略: 1」
+8. **撤回修正**：找到刚才修正的 2 条记录，点击「撤回修正」
+9. **验证恢复**：确认异常状态恢复为「待处理」，统计数据回到待处理 8 条
+10. **最终导出**：再次导出报告，确认「待处理: 8, 已修正: 0, 已忽略: 0」
+11. **跨重启验证**：刷新浏览器（模拟重启），选择同一批次，确认数据完整保留
+
+---
+
+## 📝 测试覆盖
+
+项目包含两套测试：
+
+### 验收测试 `src/tests/acceptance.test.ts`
+- 14 个测试用例，覆盖 8 个测试套件
+- 所有失败路径场景复现
+- 主流程异常识别、统计分析、规则版本管理验证
+
+### 修正撤回回归测试 `src/tests/revert-correction.test.ts`
+- 9 个测试用例，完整链路验证
+- 初始状态 → 创建修正 → 验证统计 → 撤回修正 → 验证变化 → 全部撤回 → 恢复初始 → 历史保留
+
+---
+
+## 📄 许可证
+
+MIT License

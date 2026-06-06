@@ -23,6 +23,7 @@ import {
   ruleVersionOperations,
 } from '../db';
 import { initializeRuleVersions } from '../modules/rules';
+import { revertCorrection } from '../modules/correction';
 
 interface AppState {
   initialized: boolean;
@@ -55,6 +56,7 @@ interface AppState {
   updateAnomalies: (anomalies: Anomaly[]) => Promise<void>;
   
   addCorrection: (correction: Correction) => Promise<void>;
+  revertCorrection: (correctionId: string) => Promise<boolean>;
   
   loadRuleVersions: () => Promise<void>;
   setActiveRuleVersion: (versionId: string) => Promise<void>;
@@ -298,6 +300,26 @@ export const useAppStore = create<AppState>((set, get) => ({
       }));
     } catch (error) {
       set({ error: error instanceof Error ? error.message : '保存修正记录失败' });
+    }
+  },
+
+  revertCorrection: async (correctionId: string): Promise<boolean> => {
+    try {
+      const success = await revertCorrection(correctionId);
+      if (success) {
+        const currentBatchId = get().currentBatchId;
+        if (currentBatchId) {
+          const [anomalies, corrections] = await Promise.all([
+            anomalyOperations.getByBatchId(currentBatchId),
+            correctionOperations.getByBatchId(currentBatchId),
+          ]);
+          set({ anomalies, corrections });
+        }
+      }
+      return success;
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : '撤回修正失败' });
+      return false;
     }
   },
 

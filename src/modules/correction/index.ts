@@ -50,6 +50,7 @@ export const correctAnomaly = async (
       durationMinutes: anomaly.durationMinutes,
       actualPunchIn: anomaly.actualPunchIn,
       actualPunchOut: anomaly.actualPunchOut,
+      description: anomaly.description,
     });
     
     const correction: Correction = {
@@ -204,8 +205,7 @@ export const revertCorrection = async (
   correctionId: string
 ): Promise<boolean> => {
   try {
-    const corrections = await correctionOperations.getByBatchId('');
-    const correction = corrections.find(c => c.id === correctionId);
+    const correction = await correctionOperations.getById(correctionId);
     if (!correction) return false;
     
     const anomaly = await anomalyOperations.getById(correction.anomalyId);
@@ -222,6 +222,9 @@ export const revertCorrection = async (
       }
       if (oldValue.actualPunchOut) {
         anomaly.actualPunchOut = new Date(oldValue.actualPunchOut);
+      }
+      if (oldValue.description) {
+        anomaly.description = oldValue.description;
       }
       anomaly.correctedAt = undefined;
       anomaly.correctionId = undefined;

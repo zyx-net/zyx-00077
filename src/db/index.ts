@@ -141,9 +141,15 @@ export const closeDB = (): void => {
 
 export const clearDB = async (): Promise<void> => {
   const db = await getDB();
-  const tx = db.transaction(db.objectStoreNames, 'readwrite');
+  const storeNames: string[] = [];
+  for (let i = 0; i < db.objectStoreNames.length; i++) {
+    const name = db.objectStoreNames[i];
+    if (name) storeNames.push(name);
+  }
+  if (storeNames.length === 0) return;
+  const tx = db.transaction(storeNames, 'readwrite');
   await Promise.all(
-    Array.from(db.objectStoreNames).map(storeName => tx.objectStore(storeName).clear())
+    storeNames.map(storeName => tx.objectStore(storeName).clear())
   );
   await tx.done;
 };
@@ -341,6 +347,11 @@ export const correctionOperations = {
   async getByAnomalyId(anomalyId: string): Promise<Correction[]> {
     const db = await getDB();
     return db.getAllFromIndex('corrections', 'by-anomalyId', anomalyId);
+  },
+
+  async getById(id: string): Promise<Correction | undefined> {
+    const db = await getDB();
+    return db.get('corrections', id);
   },
 
   async add(correction: Correction): Promise<string> {

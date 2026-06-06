@@ -315,6 +315,17 @@ export const useAppStore = create<AppState>((set, get) => ({
             correctionOperations.getByBatchId(currentBatchId),
           ]);
           set({ anomalies, corrections });
+
+          const pendingCount = anomalies.filter(a => a.status === 'pending').length;
+          const correctedCount = anomalies.filter(a => 
+            a.status === 'corrected' || a.status === 'ignored' || a.status === 'confirmed'
+          ).length;
+
+          await get().updateBatchStats(currentBatchId, {
+            totalAnomalies: anomalies.length,
+            pendingAnomalies: pendingCount,
+            correctedAnomalies: correctedCount,
+          });
         }
       }
       return success;

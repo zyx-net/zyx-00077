@@ -413,4 +413,85 @@ describe('Store 集成测试 - 状态同步验证', () => {
     assert.equal(s3.corrections.length, initialCorrectionsCount + 2, '所有历史记录保留');
     console.log(`✅ 批量撤回后：${finalPendingCount}个待处理，${finalConfirmedCount}个已确认，共${s3.corrections.length}条历史记录`);
   });
+
+  it('撤回修正后 batch.stats 持久化回写：修正→撤回→重新读取批次→统计一致', async () => {
+    const state = useAppStore.getState();
+    await state.selectBatch(testBatchId);
+
+    const initialAnomalies = useAppStore.getState().anomalies;
+    const pendingAnomalies = initialAnomalies.filter(a => a.status === 'pending');
+
+    if (pendingAnomalies.length === 0) {
+      console.log('⚠️  没有待处理异常，跳过此测试');
+      return;
+    }
+
+    const anomalyToCorrect = pendingAnomalies[0];
+
+    let initialBatch = await batchOperations.getById(testBatchId);
+    assert.ok(initialBatch, '批次应该存在');
+
+    const initialPending = initialBatch.stats.pendingAnomalies;
+    const initialCorrected = initialBatch.stats.correctedAnomalies;
+    console.log(`✅ 初始持久化统计：待处理=${initialPending}, 已修正=${initialCorrected}`);
+
+    const result = await correctionModule.correctAnomaly(
+      anomalyToCorrect.id,
+      'mark_normal',
+      {},
+      '测试batch.stats回写'
+    );
+
+    assert.ok(result.success);
+    assert.ok(result.updatedAnomaly);
+    assert.ok(result.correction);
+
+    await state.updateAnomaly(result.updatedAnomaly);
+    await state.addCorrection(result.correction);
+
+    let batchAfterCorrect = await batchOperations.getById(testBatchId);
+    assert.ok(batchAfterCorrect, '批次应该存在');
+    assert.equal(batchAfterCorrect.stats.pendingAnomalies, initialPending - 1,
+      '修正后持久化 pending 应该减 1');
+    assert.equal(batchAfterCorrect.stats.correctedAnomalies, initialCorrected + 1,
+      '修正后持久化 corrected 应该加 1');
+    console.log(`✅ 修正后持久化统计：待处理=${batchAfterCorrect.stats.pendingAnomalies}, 已修正=${batchAfterCorrect.stats.correctedAnomalies}`);
+
+    const revertSuccess = await state.revertCorrection(result.correction.id);
+    assert.ok(revertSuccess, '撤回应该成功');
+
+    let batchAfterRevert = await batchOperations.getById(testBatchId);
+    assert.ok(batchAfterRevert, '批次应该存在');
+    assert.equal(batchAfterRevert.stats.pendingAnomalies, initialPending,
+      '撤回后持久化 pending 应该恢复原值');
+    assert.equal(batchAfterRevert.stats.correctedAnomalies, initialCorrected,
+      '撤回后持久化 corrected 应该恢复原值');
+    console.log(`✅ 撤回后持久化统计：待处理=${batchAfterRevert.stats.pendingAnomalies}, 已修正=${batchAfterRevert.stats.correctedAnomalies}`);
+
+    await state.selectBatch(testBatchId);
+    let sAfterReload = useAppStore.getState();
+    const storePending = sAfterReload.anomalies.filter(a => a.status === 'pending').length;
+    const storeCorrected = sAfterReload.anomalies.filter(a => 
+      a.status === 'corrected' || a.status === 'ignored' || a.status === 'confirmed'
+    ).length;
+
+    assert.equal(storePending, initialPending,
+      '重新加载后 store pending 应该与持久化一致');
+    assert.equal(storeCorrected, initialCorrected,
+      '重新加载后 store corrected 应该与持久化一致');
+    assert.equal(batchAfterRevert.stats.pendingAnomalies, storePending,
+      '持久化 pending 应该与 store 一致');
+    assert.equal(batchAfterRevert.stats.correctedAnomalies, storeCorrected,
+      '持久化 corrected 应该与 store 一致');
+    console.log(`✅ 重新加载批次后一致：store待处理=${storePending}, 持久化待处理=${batchAfterRevert.stats.pendingAnomalies}`);
+
+    const summary = calculateSummary(sAfterReload.anomalies);
+    assert.equal(summary.totalAnomalies, batchAfterRevert.stats.totalAnomalies,
+      '导出统计 total 应该与持久化一致');
+    assert.equal(summary.pendingCorrections, batchAfterRevert.stats.pendingAnomalies,
+      '导出统计 pending 应该与持久化一致');
+    assert.equal(summary.correctedCount + summary.ignoredCount + summary.confirmedCount, batchAfterRevert.stats.correctedAnomalies,
+      '导出统计 corrected 应该与持久化一致');
+    console.log(`✅ 导出统计与持久化一致：total=${summary.totalAnomalies}, pending=${summary.pendingCorrections}, corrected=${summary.correctedCount + summary.ignoredCount + summary.confirmedCount}`);
+  });
 });

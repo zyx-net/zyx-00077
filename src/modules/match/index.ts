@@ -80,6 +80,7 @@ export const removeDuplicatePunches = (
 };
 
 export const matchSchedulesAndPunches = (
+  batchId: string,
   schedules: ScheduleRecord[],
   punches: PunchRecord[],
   leaves: LeaveRecord[] = [],
@@ -215,6 +216,7 @@ export const matchSchedulesAndPunches = (
     
     const matchedRecord: MatchedRecord = {
       id: generateId(),
+      batchId,
       schedule,
       punches: matchedPunches,
       leave: leaveForDay,

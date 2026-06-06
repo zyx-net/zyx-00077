@@ -27,6 +27,16 @@ import type {
   AppealCreateParams,
   AppealReviewParams,
   AppealConflict,
+  Simulator,
+  SimulatorCreateParams,
+  SimulatorUpdateParams,
+  SimulatorConflict,
+  SimulatorSaveResult,
+  SimulatorApplyResult,
+  SimulatorRevertResult,
+  SimulationResult,
+  SimulationDiff,
+  SimulatorRuleParams,
 } from '../types';
 import { generateId, getDefaultTimezone } from '../utils/dateUtils';
 import {
@@ -42,6 +52,7 @@ import {
   auditExportSnapshotOperations,
   presetOperations,
   appealOperations,
+  simulatorOperations,
 } from '../db';
 import { initializeRuleVersions } from '../modules/rules';
 import { revertCorrection } from '../modules/correction';
@@ -75,6 +86,24 @@ import {
   getAppealsByBatchId,
   checkConflicts,
 } from '../modules/appeal';
+import {
+  createSimulator,
+  runSimulation,
+  updateSimulator,
+  duplicateSimulator,
+  deleteSimulator,
+  getSimulators,
+  getSimulatorById,
+  saveSimulatorDraft,
+  applySimulator,
+  revertSimulator,
+  checkConflicts as checkSimulatorConflicts,
+  checkPermission as checkSimulatorPermission,
+  exportSimulatorsToJSON,
+  importSimulatorsFromJSON,
+  forceImportSimulator,
+  generateSimulatorSummary,
+} from '../modules/simulator';
 
 interface AppState {
   initialized: boolean;
@@ -174,6 +203,34 @@ interface AppState {
     errorMessage?: string;
     metadata?: Record<string, any>;
   }) => Promise<AuditLogEntry>;
+
+  simulators: Simulator[];
+  currentSimulatorId: string | null;
+  loadSimulators: (sourceBatchId?: string) => Promise<void>;
+  createSimulator: (params: SimulatorCreateParams) => Promise<SimulatorSaveResult>;
+  selectSimulator: (simulatorId: string | null) => void;
+  updateSimulator: (params: SimulatorUpdateParams) => Promise<Simulator | null>;
+  runSimulation: (simulatorId: string) => Promise<{ simulator: Simulator; result: SimulationResult; diff: SimulationDiff } | null>;
+  duplicateSimulator: (simulatorId: string, newName: string, operator?: string) => Promise<Simulator | null>;
+  deleteSimulator: (simulatorId: string, operator?: string) => Promise<boolean>;
+  saveSimulatorDraft: (simulator: Simulator, overwrite?: boolean, operator?: string) => Promise<SimulatorSaveResult>;
+  applySimulator: (simulatorId: string, force?: boolean, operator?: string) => Promise<SimulatorApplyResult>;
+  revertSimulator: (simulatorId: string, operator?: string) => Promise<SimulatorRevertResult>;
+  checkSimulatorConflicts: (simulatorId: string) => Promise<SimulatorConflict[]>;
+  checkSimulatorPermission: (simulator: Simulator, user: string, required: 'readonly' | 'admin') => boolean;
+  exportSimulatorsToJSON: (simulatorIds?: string[], operator?: string) => ReturnType<typeof exportSimulatorsToJSON>;
+  importSimulatorsFromJSON: (jsonData: Awaited<ReturnType<typeof exportSimulatorsToJSON>>, operator?: string) => ReturnType<typeof importSimulatorsFromJSON>;
+  forceImportSimulator: (simData: Omit<Simulator, 'id'>, overwrite: boolean, operator?: string) => Promise<Simulator>;
+  recordSimulatorAuditLog: (params: {
+    batchId: string;
+    action: import('../types').SimulatorActionType;
+    simulator: Simulator;
+    operator?: string;
+    success: boolean;
+    errorMessage?: string;
+    oldSimulator?: Simulator;
+    metadata?: Record<string, any>;
+  }) => Promise<AuditLogEntry>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -192,6 +249,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   exportSnapshots: [],
   presets: [],
   appeals: [],
+  simulators: [],
+  currentSimulatorId: null,
   loading: false,
   error: null,
 
@@ -1193,6 +1252,218 @@ export const useAppStore = create<AppState>((set, get) => ({
       },
       linkedEntityIds: {
         anomalyIds: [params.appeal.anomalyId],
+      },
+    });
+  },
+
+  loadSimulators: async (sourceBatchId?: string) => {
+    try {
+      const simulators = await getSimulators(sourceBatchId);
+      set({ simulators });
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : '加载模拟方案失败' });
+    }
+  },
+
+  createSimulator: async (params) => {
+    const result = await createSimulator(params);
+
+    if (result.success && result.simulator) {
+      await get().loadSimulators(params.sourceBatchId);
+    }
+
+    return result;
+  },
+
+  selectSimulator: (simulatorId: string | null) => {
+    set({ currentSimulatorId: simulatorId });
+  },
+
+  updateSimulator: async (params) => {
+    const result = await updateSimulator(params);
+
+    if (result) {
+      await get().loadSimulators(result.sourceBatchId);
+    }
+
+    return result;
+  },
+
+  runSimulation: async (simulatorId: string) => {
+    try {
+      set({ loading: true });
+      const result = await runSimulation(simulatorId);
+
+      if (result) {
+        await get().loadSimulators(result.simulator.sourceBatchId);
+      }
+
+      set({ loading: false });
+      return result;
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : '模拟运行失败', loading: false });
+      return null;
+    }
+  },
+
+  duplicateSimulator: async (simulatorId: string, newName: string, operator?: string) => {
+    const result = await duplicateSimulator(simulatorId, newName, operator);
+
+    if (result) {
+      await get().loadSimulators(result.sourceBatchId);
+    }
+
+    return result;
+  },
+
+  deleteSimulator: async (simulatorId: string, operator?: string) => {
+    const simulator = await getSimulatorById(simulatorId);
+    const result = await deleteSimulator(simulatorId, operator);
+
+    if (result && simulator) {
+      await get().loadSimulators(simulator.sourceBatchId);
+
+      await get().recordSimulatorAuditLog({
+        batchId: simulator.sourceBatchId,
+        action: 'simulator_delete',
+        simulator,
+        operator,
+        success: true,
+        metadata: {
+          deletedConfig: generateSimulatorSummary(simulator),
+        },
+      });
+    }
+
+    return result;
+  },
+
+  saveSimulatorDraft: async (simulator: Simulator, overwrite: boolean = false, operator?: string) => {
+    const result = await saveSimulatorDraft(simulator, overwrite, operator);
+
+    if (result.success && result.simulator) {
+      await get().loadSimulators(result.simulator.sourceBatchId);
+
+      await get().recordSimulatorAuditLog({
+        batchId: result.simulator.sourceBatchId,
+        action: 'simulator_save',
+        simulator: result.simulator,
+        operator,
+        success: true,
+        metadata: {
+          config: generateSimulatorSummary(result.simulator),
+        },
+      });
+    }
+
+    return result;
+  },
+
+  applySimulator: async (simulatorId: string, force: boolean = false, operator?: string) => {
+    const result = await applySimulator(simulatorId, force, operator);
+
+    if (result.success && result.simulator) {
+      await get().loadSimulators(result.simulator.sourceBatchId);
+      await get().loadRuleVersions();
+    }
+
+    return result;
+  },
+
+  revertSimulator: async (simulatorId: string, operator?: string) => {
+    const result = await revertSimulator(simulatorId, operator);
+
+    if (result.success && result.simulator) {
+      await get().loadSimulators(result.simulator.sourceBatchId);
+      await get().loadRuleVersions();
+    }
+
+    return result;
+  },
+
+  checkSimulatorConflicts: async (simulatorId: string) => {
+    return checkSimulatorConflicts(simulatorId);
+  },
+
+  checkSimulatorPermission: (simulator: Simulator, user: string, required: 'readonly' | 'admin') => {
+    return checkSimulatorPermission(simulator, user, required);
+  },
+
+  exportSimulatorsToJSON: async (simulatorIds?: string[], operator?: string) => {
+    const result = await exportSimulatorsToJSON(simulatorIds, operator);
+    return result;
+  },
+
+  importSimulatorsFromJSON: async (jsonData: any, operator?: string) => {
+    const result = await importSimulatorsFromJSON(jsonData, operator);
+
+    if (result.imported.length > 0) {
+      await get().loadSimulators();
+    }
+
+    return result;
+  },
+
+  forceImportSimulator: async (simData: Omit<Simulator, 'id'>, overwrite: boolean, operator?: string) => {
+    const result = await forceImportSimulator(simData, overwrite, operator);
+
+    if (result) {
+      await get().loadSimulators(result.sourceBatchId);
+
+      await get().recordSimulatorAuditLog({
+        batchId: result.sourceBatchId,
+        action: 'simulator_import',
+        simulator: result,
+        operator,
+        success: true,
+        metadata: {
+          overwrite,
+          config: generateSimulatorSummary(result),
+          originalName: simData.name,
+        },
+      });
+    }
+
+    return result;
+  },
+
+  recordSimulatorAuditLog: async (params) => {
+    const state = get();
+    const emptyStats = createStatsSnapshot(undefined, []);
+
+    const actionDescriptions: Record<string, string> = {
+      simulator_create: '创建模拟方案',
+      simulator_save: '保存模拟方案',
+      simulator_update: '更新模拟方案',
+      simulator_delete: '删除模拟方案',
+      simulator_apply: '应用模拟方案',
+      simulator_revert: '撤销模拟方案',
+      simulator_import: '导入模拟方案',
+      simulator_export: '导出模拟方案',
+      simulator_duplicate: '复制模拟方案',
+    };
+
+    return createAuditLog({
+      batchId: params.batchId,
+      action: params.action,
+      operator: params.operator || 'user',
+      description: `${actionDescriptions[params.action] || params.action}：${params.simulator.name}`,
+      success: params.success,
+      errorMessage: params.errorMessage,
+      statsBefore: emptyStats,
+      statsAfter: emptyStats,
+      metadata: {
+        simulatorId: params.simulator.id,
+        params: params.simulator.params,
+        status: params.simulator.status,
+        oldConfig: params.oldSimulator ? generateSimulatorSummary(params.oldSimulator) : undefined,
+        newConfig: generateSimulatorSummary(params.simulator),
+        ...params.metadata,
+      },
+      linkedEntityIds: {
+        ruleVersionIds: params.simulator.appliedRuleVersionId
+          ? [params.simulator.appliedRuleVersionId]
+          : [],
       },
     });
   },

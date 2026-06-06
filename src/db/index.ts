@@ -12,10 +12,11 @@ import type {
   AuditExportSnapshot,
   Preset,
   Appeal,
+  Simulator,
 } from '../types';
 
 const DB_NAME = 'attendance-reconciliation-db';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 
 export interface DBSchema {
   batches: {
@@ -84,6 +85,18 @@ export interface DBSchema {
       'by-createdAt': Date;
       'by-batchId-status': [string, string];
       'by-batchId-createdAt': [string, Date];
+    };
+  };
+  simulators: {
+    key: string;
+    value: Simulator;
+    indexes: {
+      'by-sourceBatchId': string;
+      'by-status': string;
+      'by-name': string;
+      'by-createdAt': Date;
+      'by-createdBy': string;
+      'by-sourceBatchId-createdAt': [string, Date];
     };
   };
 }
@@ -185,6 +198,16 @@ export const initDB = async (): Promise<IDBPDatabase<DBSchema>> => {
         appealStore.createIndex('by-batchId-status', ['batchId', 'status']);
         appealStore.createIndex('by-batchId-createdAt', ['batchId', 'createdAt']);
       }
+
+      if (!db.objectStoreNames.contains('simulators')) {
+        const simulatorStore = db.createObjectStore('simulators', { keyPath: 'id' });
+        simulatorStore.createIndex('by-sourceBatchId', 'sourceBatchId');
+        simulatorStore.createIndex('by-status', 'status');
+        simulatorStore.createIndex('by-name', 'name');
+        simulatorStore.createIndex('by-createdAt', 'createdAt');
+        simulatorStore.createIndex('by-createdBy', 'createdBy');
+        simulatorStore.createIndex('by-sourceBatchId-createdAt', ['sourceBatchId', 'createdAt']);
+      }
     },
   });
 
@@ -243,7 +266,7 @@ export const batchOperations = {
 
   async delete(id: string): Promise<void> {
     const db = await getDB();
-    const tx = db.transaction(['batches', 'schedules', 'punches', 'leaves', 'anomalies', 'corrections', 'matchedRecords', 'auditLogs', 'auditExportSnapshots', 'appeals'], 'readwrite');
+    const tx = db.transaction(['batches', 'schedules', 'punches', 'leaves', 'anomalies', 'corrections', 'matchedRecords', 'auditLogs', 'auditExportSnapshots', 'appeals', 'simulators'], 'readwrite');
     
     await tx.objectStore('batches').delete(id);
     
@@ -299,6 +322,12 @@ export const batchOperations = {
     while (appealCursor) {
       await appealCursor.delete();
       appealCursor = await appealCursor.continue();
+    }
+    
+    let simulatorCursor = await tx.objectStore('simulators').index('by-sourceBatchId').openCursor(IDBKeyRange.only(id));
+    while (simulatorCursor) {
+      await simulatorCursor.delete();
+      simulatorCursor = await simulatorCursor.continue();
     }
     
     await tx.done;
@@ -389,6 +418,11 @@ export const anomalyOperations = {
   async getById(id: string): Promise<Anomaly | undefined> {
     const db = await getDB();
     return db.get('anomalies', id);
+  },
+
+  async add(anomaly: Anomaly): Promise<string> {
+    const db = await getDB();
+    return db.add('anomalies', anomaly) as Promise<string>;
   },
 
   async addMany(anomalies: Anomaly[]): Promise<void> {
@@ -497,6 +531,11 @@ export const ruleVersionOperations = {
     const versions = await ruleVersionOperations.getAll();
     if (versions.length === 0) return 0;
     return Math.max(...versions.map(v => v.version));
+  },
+
+  async delete(id: string): Promise<void> {
+    const db = await getDB();
+    await db.delete('ruleVersions', id);
   },
 };
 
@@ -735,6 +774,85 @@ export const appealOperations = {
     const db = await getDB();
     const tx = db.transaction('appeals', 'readwrite');
     await Promise.all(appeals.map(a => tx.store.add(a)));
+    await tx.done;
+  },
+};
+
+export const simulatorOperations = {
+  async getAll(): Promise<Simulator[]> {
+    const db = await getDB();
+    return db.getAllFromIndex('simulators', 'by-createdAt');
+  },
+
+  async getBySourceBatchId(sourceBatchId: string): Promise<Simulator[]> {
+    const db = await getDB();
+    const all = await db.getAllFromIndex('simulators', 'by-sourceBatchId', sourceBatchId);
+    return all.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  },
+
+  async getById(id: string): Promise<Simulator | undefined> {
+    const db = await getDB();
+    return db.get('simulators', id);
+  },
+
+  async getByName(name: string, sourceBatchId?: string): Promise<Simulator | undefined> {
+    const db = await getDB();
+    const all = await db.getAllFromIndex('simulators', 'by-name', name);
+    if (sourceBatchId) {
+      return all.find(s => s.sourceBatchId === sourceBatchId);
+    }
+    return all[0];
+  },
+
+  async getByStatus(status: string): Promise<Simulator[]> {
+    const db = await getDB();
+    const all = await db.getAllFromIndex('simulators', 'by-status', status);
+    return all.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  },
+
+  async getByCreatedBy(createdBy: string): Promise<Simulator[]> {
+    const db = await getDB();
+    const all = await db.getAllFromIndex('simulators', 'by-createdBy', createdBy);
+    return all.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  },
+
+  async add(simulator: Simulator): Promise<string> {
+    const db = await getDB();
+    return db.add('simulators', simulator) as Promise<string>;
+  },
+
+  async addMany(simulators: Simulator[]): Promise<void> {
+    const db = await getDB();
+    const tx = db.transaction('simulators', 'readwrite');
+    await Promise.all(simulators.map(s => tx.store.put(s)));
+    await tx.done;
+  },
+
+  async update(simulator: Simulator): Promise<string> {
+    const db = await getDB();
+    return db.put('simulators', simulator) as Promise<string>;
+  },
+
+  async delete(id: string): Promise<void> {
+    const db = await getDB();
+    await db.delete('simulators', id);
+  },
+
+  async clearBySourceBatchId(sourceBatchId: string): Promise<void> {
+    const db = await getDB();
+    const tx = db.transaction('simulators', 'readwrite');
+    let cursor = await tx.store.index('by-sourceBatchId').openCursor(IDBKeyRange.only(sourceBatchId));
+    while (cursor) {
+      await cursor.delete();
+      cursor = await cursor.continue();
+    }
+    await tx.done;
+  },
+
+  async clear(): Promise<void> {
+    const db = await getDB();
+    const tx = db.transaction('simulators', 'readwrite');
+    await tx.store.clear();
     await tx.done;
   },
 };

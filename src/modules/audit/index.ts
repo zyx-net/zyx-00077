@@ -42,6 +42,15 @@ const ACTION_LABELS: Record<AuditActionType, string> = {
   appeal_reject: '驳回申诉',
   appeal_revoke: '撤销申诉',
   appeal_auto_correct: '申诉自动修正',
+  simulator_create: '创建模拟方案',
+  simulator_save: '保存模拟方案',
+  simulator_update: '更新模拟方案',
+  simulator_delete: '删除模拟方案',
+  simulator_apply: '应用模拟方案',
+  simulator_revert: '撤销模拟方案',
+  simulator_import: '导入模拟方案',
+  simulator_export: '导出模拟方案',
+  simulator_duplicate: '复制模拟方案',
 };
 
 export const createStatsSnapshot = (

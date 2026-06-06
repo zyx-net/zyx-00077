@@ -147,6 +147,7 @@ export interface Correction {
 
 export interface MatchedRecord {
   id: string;
+  batchId: string;
   schedule: ScheduleRecord;
   punches: PunchRecord[];
   leave?: LeaveRecord;
@@ -277,6 +278,17 @@ export type AppealActionType =
   | 'appeal_revoke'
   | 'appeal_auto_correct';
 
+export type SimulatorActionType =
+  | 'simulator_create'
+  | 'simulator_save'
+  | 'simulator_update'
+  | 'simulator_delete'
+  | 'simulator_apply'
+  | 'simulator_revert'
+  | 'simulator_import'
+  | 'simulator_export'
+  | 'simulator_duplicate';
+
 export type AppealConflictType =
   | 'pending_appeal_exists'
   | 'anomaly_corrected'
@@ -359,7 +371,8 @@ export type AuditActionType =
   | 'batch_delete'
   | 'restore'
   | PresetActionType
-  | AppealActionType;
+  | AppealActionType
+  | SimulatorActionType;
 
 export interface ImportPresetConfig {
   fieldMapping: FieldMapping;
@@ -481,4 +494,142 @@ export interface ExportOptions {
   template?: string;
   title?: string;
   generatedAt?: Date;
+}
+
+export interface SimulatorRuleParams {
+  lateGracePeriodMinutes: number;
+  earlyLeaveThresholdMinutes: number;
+  crossDayMaxHours: number;
+  duplicatePunchWindowMinutes: number;
+}
+
+export interface SimulatorDataSnapshot {
+  schedules: ScheduleRecord[];
+  punches: PunchRecord[];
+  leaves: LeaveRecord[];
+  matchedRecords: MatchedRecord[];
+  originalAnomalies: Anomaly[];
+  originalRuleVersionId: string;
+  originalStatsVersion: number;
+  batchStatsAtCopy: BatchStats;
+}
+
+export interface SimulationResult {
+  anomalies: Anomaly[];
+  summary: RuleEngineResult['summary'];
+  durationMs: number;
+  ruleVersionId: string;
+}
+
+export interface SimulationDiffItem {
+  type: 'added' | 'removed' | 'modified';
+  anomalyId: string;
+  original?: Anomaly;
+  simulated?: Anomaly;
+}
+
+export interface SimulationDiff {
+  items: SimulationDiffItem[];
+  summary: {
+    totalAdded: number;
+    totalRemoved: number;
+    totalModified: number;
+    netChange: number;
+    byType: Record<AnomalyType, number>;
+  };
+}
+
+export type SimulatorStatus = 'draft' | 'ready' | 'applied' | 'reverted' | 'conflicted';
+
+export type SimulatorConflictType =
+  | 'name_exists'
+  | 'batch_data_changed'
+  | 'new_detection_results'
+  | 'rule_version_rolled_back'
+  | 'applied_simulator_exists'
+  | 'stats_version_mismatch';
+
+export interface SimulatorConflict {
+  type: SimulatorConflictType;
+  message: string;
+  severity: 'warning' | 'error';
+  details?: Record<string, any>;
+  resolutionOptions: ('overwrite' | 'rename' | 'reload' | 'cancel')[];
+}
+
+export type SimulatorPermission = 'readonly' | 'admin';
+
+export interface Simulator {
+  id: string;
+  name: string;
+  description?: string;
+  sourceBatchId: string;
+  sourceBatchName: string;
+  status: SimulatorStatus;
+  params: SimulatorRuleParams;
+  dataSnapshot: SimulatorDataSnapshot;
+  simulationResult?: SimulationResult;
+  simulationDiff?: SimulationDiff;
+  appliedRuleVersionId?: string;
+  revertedFromRuleVersionId?: string;
+  permissions: {
+    owner: string;
+    viewers: string[];
+    editors: string[];
+  };
+  createdBy: string;
+  createdAt: Date;
+  updatedAt: Date;
+  appliedAt?: Date;
+  appliedBy?: string;
+  revertedAt?: Date;
+  revertedBy?: string;
+  schemaVersion: number;
+  metadata: Record<string, any>;
+}
+
+export interface SimulatorCreateParams {
+  name: string;
+  description?: string;
+  sourceBatchId: string;
+  operator?: string;
+}
+
+export interface SimulatorUpdateParams {
+  id: string;
+  name?: string;
+  description?: string;
+  params?: Partial<SimulatorRuleParams>;
+  operator?: string;
+}
+
+export interface SimulatorApplyResult {
+  success: boolean;
+  simulator?: Simulator;
+  newRuleVersion?: RuleVersion;
+  conflicts?: SimulatorConflict[];
+  requiresConfirmation: boolean;
+}
+
+export interface SimulatorRevertResult {
+  success: boolean;
+  simulator?: Simulator;
+  revertedToRuleVersionId?: string;
+  message: string;
+}
+
+export interface SimulatorImportData {
+  schemaVersion: number;
+  exportedAt: Date;
+  exportedBy: string;
+  simulators: Omit<Simulator, 'id'>[];
+}
+
+export const SIMULATOR_SCHEMA_VERSION = 1;
+
+export interface SimulatorSaveResult {
+  success: boolean;
+  simulator?: Simulator;
+  conflicts?: SimulatorConflict[];
+  requiresConfirmation: boolean;
 }

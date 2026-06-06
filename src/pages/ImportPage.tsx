@@ -420,6 +420,7 @@ export default function ImportPage() {
       showToast('info', '正在进行数据匹配...');
 
       const matchResult = matchModule.matchSchedulesAndPunches(
+        currentBatchId,
         schedules,
         punches,
         leaves

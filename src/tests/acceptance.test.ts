@@ -164,6 +164,7 @@ describe('排班考勤异常对账分析工具 - 验收测试', () => {
 
       const matchedRecord: MatchedRecord = {
         id: 'm1',
+        batchId: 'test_batch',
         schedule,
         punches: [punchIn, punchOut],
         date: '2024-01-15',
@@ -295,6 +296,7 @@ describe('排班考勤异常对账分析工具 - 验收测试', () => {
 
       const lateRecord: MatchedRecord = {
         id: generateId(),
+        batchId: 'test_batch',
         schedule: createSchedule('09:00', '18:00'),
         punches: [createPunch('2024-01-15 09:15:00', 'in'), createPunch('2024-01-15 18:00:00', 'out')],
         date: '2024-01-15',
@@ -306,6 +308,7 @@ describe('排班考勤异常对账分析工具 - 验收测试', () => {
 
       const earlyRecord: MatchedRecord = {
         id: generateId(),
+        batchId: 'test_batch',
         schedule: createSchedule('09:00', '18:00'),
         punches: [createPunch('2024-01-15 09:00:00', 'in'), createPunch('2024-01-15 17:45:00', 'out')],
         date: '2024-01-15',
@@ -317,6 +320,7 @@ describe('排班考勤异常对账分析工具 - 验收测试', () => {
 
       const missingRecord: MatchedRecord = {
         id: generateId(),
+        batchId: 'test_batch',
         schedule: createSchedule('09:00', '18:00'),
         punches: [createPunch('2024-01-15 08:58:00', 'in')],
         date: '2024-01-15',
@@ -462,7 +466,7 @@ describe('排班考勤异常对账分析工具 - 验收测试', () => {
       };
 
       const matchedRecord: MatchedRecord = {
-        id: 'm1', schedule, punches: [punchIn, punchOut],
+        id: 'm1', batchId: 'test_batch', schedule, punches: [punchIn, punchOut],
         date: '2024-01-15', employeeId: 'E001',
         workStartTime: punchIn.punchTime, workEndTime: punchOut.punchTime,
         durationMinutes: 525,

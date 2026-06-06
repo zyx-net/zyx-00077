@@ -10,6 +10,7 @@ import RulesPage from '@/pages/RulesPage';
 import ReportsPage from '@/pages/ReportsPage';
 import BatchesPage from '@/pages/BatchesPage';
 import AppealsPage from '@/pages/AppealsPage';
+import SimulatorPage from '@/pages/SimulatorPage';
 
 function AppContent() {
   const { initApp, loading, error, initialized, setError } = useAppStore();
@@ -58,6 +59,7 @@ function AppContent() {
       <Route path="/reports" element={<ReportsPage />} />
       <Route path="/batches" element={<BatchesPage />} />
       <Route path="/appeals" element={<AppealsPage />} />
+      <Route path="/simulator" element={<SimulatorPage />} />
       <Route path="*" element={
         <div className="min-h-screen bg-slate-50 flex items-center justify-center">
           <div className="text-center">

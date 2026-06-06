@@ -11,6 +11,7 @@ import {
   X,
   Clock,
   MessageSquare,
+  GitCompare,
 } from 'lucide-react';
 import { useAppStore } from '@/store';
 
@@ -29,6 +30,7 @@ const menuItems: MenuItem[] = [
   { path: '/import', label: '数据导入', icon: <Upload size={20} /> },
   { path: '/anomalies', label: '异常分析', icon: <AlertTriangle size={20} /> },
   { path: '/appeals', label: '异常申诉', icon: <MessageSquare size={20} /> },
+  { path: '/simulator', label: '规则影响模拟', icon: <GitCompare size={20} /> },
   { path: '/rules', label: '规则配置', icon: <Settings size={20} /> },
   { path: '/reports', label: '统计报告', icon: <FileBarChart size={20} /> },
   { path: '/batches', label: '批次管理', icon: <Database size={20} /> },

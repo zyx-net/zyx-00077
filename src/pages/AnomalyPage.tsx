@@ -20,6 +20,7 @@ import {
   ThumbsUp,
   PlusCircle,
   History,
+  Undo2,
 } from 'lucide-react';
 import Layout from '@/components/Layout';
 import Loading from '@/components/Loading';
@@ -64,6 +65,7 @@ export default function AnomalyPage() {
     updateAnomaly,
     updateAnomalies,
     addCorrection,
+    revertCorrection,
     loading,
   } = useAppStore();
   const { showToast } = useToast();
@@ -71,7 +73,9 @@ export default function AnomalyPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [showDetailModal, setShowDetailModal] = useState(false);
   const [showCorrectionModal, setShowCorrectionModal] = useState(false);
+  const [showRevertModal, setShowRevertModal] = useState(false);
   const [selectedAnomaly, setSelectedAnomaly] = useState<Anomaly | null>(null);
+  const [revertingCorrection, setRevertingCorrection] = useState<Correction | null>(null);
   const [showFilters, setShowFilters] = useState(true);
   const [filters, setFilters] = useState<FilterState>({
     type: '',
@@ -274,13 +278,14 @@ export default function AnomalyPage() {
 
   const handleIgnore = async (anomaly: Anomaly) => {
     try {
-      const updated: Anomaly = {
-        ...anomaly,
-        status: 'ignored',
-        correctedAt: new Date(),
-      };
-      await updateAnomaly(updated);
-      showToast('success', '已标记为忽略');
+      const result = await correctionModule.ignoreAnomaly(anomaly.id, '用户手动标记忽略');
+      if (result.success && result.updatedAnomaly) {
+        await updateAnomaly(result.updatedAnomaly);
+        await addCorrection(result.correction);
+        showToast('success', '已标记为忽略');
+      } else {
+        showToast('error', '操作失败');
+      }
     } catch (error) {
       showToast('error', '操作失败');
     }
@@ -288,15 +293,42 @@ export default function AnomalyPage() {
 
   const handleConfirm = async (anomaly: Anomaly) => {
     try {
-      const updated: Anomaly = {
-        ...anomaly,
-        status: 'confirmed',
-        correctedAt: new Date(),
-      };
-      await updateAnomaly(updated);
-      showToast('success', '已确认异常');
+      const result = await correctionModule.confirmAnomaly(anomaly.id);
+      if (result.success && result.updatedAnomaly) {
+        await updateAnomaly(result.updatedAnomaly);
+        await addCorrection(result.correction);
+        showToast('success', '已确认异常');
+      } else {
+        showToast('error', '操作失败');
+      }
     } catch (error) {
       showToast('error', '操作失败');
+    }
+  };
+
+  const openRevertModal = (anomaly: Anomaly) => {
+    const correction = corrections.find(c => c.id === anomaly.correctionId);
+    if (!correction) return;
+    setSelectedAnomaly(anomaly);
+    setRevertingCorrection(correction);
+    setShowRevertModal(true);
+  };
+
+  const handleRevert = async () => {
+    if (!revertingCorrection) return;
+
+    try {
+      const success = await revertCorrection(revertingCorrection.id);
+      if (success) {
+        setShowRevertModal(false);
+        setRevertingCorrection(null);
+        setSelectedAnomaly(null);
+        showToast('success', '撤回成功，异常已恢复到修正前状态');
+      } else {
+        showToast('error', '撤回失败');
+      }
+    } catch (error) {
+      showToast('error', '撤回失败');
     }
   };
 
@@ -737,6 +769,15 @@ export default function AnomalyPage() {
                               </button>
                             </>
                           )}
+                          {anomaly.status !== 'pending' && anomaly.correctionId && (
+                            <button
+                              className="p-1.5 hover:bg-orange-50 rounded transition-colors"
+                              onClick={() => openRevertModal(anomaly)}
+                              title="撤回修正"
+                            >
+                              <Undo2 size={16} className="text-orange-600" />
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -842,6 +883,17 @@ export default function AnomalyPage() {
                 修正
               </button>
             </>
+          ) : selectedAnomaly?.correctionId ? (
+            <button
+              className="btn-secondary"
+              onClick={() => {
+                setShowDetailModal(false);
+                openRevertModal(selectedAnomaly);
+              }}
+            >
+              <Undo2 size={16} className="inline mr-1" />
+              撤回修正
+            </button>
           ) : null
         }
       >
@@ -1105,6 +1157,77 @@ export default function AnomalyPage() {
                 }
                 placeholder="请详细说明修正原因..."
               />
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      <Modal
+        isOpen={showRevertModal}
+        onClose={() => {
+          setShowRevertModal(false);
+          setRevertingCorrection(null);
+        }}
+        title="确认撤回修正"
+        size="md"
+        footer={
+          <>
+            <button
+              className="btn-secondary"
+              onClick={() => {
+                setShowRevertModal(false);
+                setRevertingCorrection(null);
+              }}
+            >
+              取消
+            </button>
+            <button className="btn-primary bg-orange-600 hover:bg-orange-700" onClick={handleRevert}>
+              确认撤回
+            </button>
+          </>
+        }
+      >
+        {revertingCorrection && selectedAnomaly && (
+          <div className="space-y-4">
+            <div className="p-4 bg-amber-50 rounded-lg border border-amber-200">
+              <div className="flex items-start gap-3">
+                <AlertTriangle size={20} className="text-amber-600 flex-shrink-0 mt-0.5" />
+                <div>
+                  <h4 className="font-medium text-amber-800 mb-1">撤回后将恢复到修正前状态</h4>
+                  <p className="text-sm text-amber-700">
+                    异常状态、描述、时长等所有字段将恢复到修正之前的值，此操作不会删除修正历史记录。
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-3 text-sm">
+              <div className="flex justify-between">
+                <span className="text-slate-600">员工：</span>
+                <span className="font-medium">{selectedAnomaly.employeeName || selectedAnomaly.employeeId}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-600">日期：</span>
+                <span className="font-medium">{selectedAnomaly.scheduleDate}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-600">异常类型：</span>
+                <AnomalyBadge type={selectedAnomaly.type} />
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-600">修正类型：</span>
+                <span className="font-medium">
+                  {correctionModule.CORRECTION_TYPE_LABELS[revertingCorrection.type as CorrectionType] || revertingCorrection.type}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-600">修正时间：</span>
+                <span className="font-medium">{formatDateTime(revertingCorrection.createdAt)}</span>
+              </div>
+              <div className="pt-2 border-t border-slate-200">
+                <div className="text-slate-600 mb-1">修正原因：</div>
+                <div className="font-medium bg-slate-50 p-2 rounded">{revertingCorrection.reason}</div>
+              </div>
             </div>
           </div>
         )}

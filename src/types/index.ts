@@ -268,6 +268,86 @@ export type PresetActionType =
   | 'preset_import'
   | 'preset_export';
 
+export type AppealStatus = 'pending' | 'approved' | 'rejected' | 'revoked';
+
+export type AppealActionType =
+  | 'appeal_create'
+  | 'appeal_approve'
+  | 'appeal_reject'
+  | 'appeal_revoke'
+  | 'appeal_auto_correct';
+
+export type AppealConflictType =
+  | 'pending_appeal_exists'
+  | 'anomaly_corrected'
+  | 'anomaly_already_corrected'
+  | 'batch_deleted'
+  | 'anomaly_not_found'
+  | 'invalid_state_transition';
+
+export interface AppealEvidence {
+  id: string;
+  type: 'file' | 'note' | 'link' | 'leave_record' | 'punch_record';
+  name: string;
+  url?: string;
+  description?: string;
+  metadata?: Record<string, any>;
+  uploadedAt: Date;
+  uploadedBy: string;
+}
+
+export interface Appeal {
+  id: string;
+  batchId: string;
+  anomalyId: string;
+  employeeId: string;
+  employeeName?: string;
+  department?: string;
+  anomalyType: AnomalyType;
+  anomalyDescription: string;
+  scheduleDate: string;
+  reason: string;
+  status: AppealStatus;
+  correctionType?: string;
+  correctionValue?: any;
+  evidence: AppealEvidence[];
+  createdBy: string;
+  createdAt: Date;
+  updatedAt: Date;
+  reviewedBy?: string;
+  reviewedAt?: Date;
+  reviewComment?: string;
+  correctionId?: string;
+  metadata: Record<string, any>;
+}
+
+export interface AppealConflict {
+  type: AppealConflictType;
+  message: string;
+  severity: 'warning' | 'error';
+  details?: any;
+}
+
+export interface AppealCreateParams {
+  anomalyId: string;
+  reason: string;
+  correctionType?: string;
+  correctionValue?: any;
+  evidence?: Omit<AppealEvidence, 'id' | 'uploadedAt'>[];
+  operator?: string;
+}
+
+export interface AppealReviewParams {
+  appealId: string;
+  comment: string;
+  operator?: string;
+}
+
+export interface AppealStateSummary {
+  statusBefore: AppealStatus;
+  statusAfter: AppealStatus;
+}
+
 export type AuditActionType = 
   | 'import' 
   | 'rule_switch' 
@@ -278,7 +358,8 @@ export type AuditActionType =
   | 'batch_create' 
   | 'batch_delete'
   | 'restore'
-  | PresetActionType;
+  | PresetActionType
+  | AppealActionType;
 
 export interface ImportPresetConfig {
   fieldMapping: FieldMapping;
@@ -361,6 +442,7 @@ export interface AuditLogEntry {
     correctionIds?: string[];
     ruleVersionIds?: string[];
     exportId?: string;
+    appealIds?: string[];
   };
   statsVersion: number;
 }

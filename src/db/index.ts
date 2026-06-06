@@ -11,10 +11,11 @@ import type {
   AuditLogEntry,
   AuditExportSnapshot,
   Preset,
+  Appeal,
 } from '../types';
 
 const DB_NAME = 'attendance-reconciliation-db';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 export interface DBSchema {
   batches: {
@@ -71,6 +72,19 @@ export interface DBSchema {
     key: string;
     value: Preset;
     indexes: { 'by-type': string; 'by-name': string; 'by-createdAt': Date; 'by-type-createdAt': [string, Date] };
+  };
+  appeals: {
+    key: string;
+    value: Appeal;
+    indexes: {
+      'by-batchId': string;
+      'by-anomalyId': string;
+      'by-status': string;
+      'by-employeeId': string;
+      'by-createdAt': Date;
+      'by-batchId-status': [string, string];
+      'by-batchId-createdAt': [string, Date];
+    };
   };
 }
 
@@ -160,6 +174,17 @@ export const initDB = async (): Promise<IDBPDatabase<DBSchema>> => {
         presetStore.createIndex('by-createdAt', 'createdAt');
         presetStore.createIndex('by-type-createdAt', ['type', 'createdAt']);
       }
+
+      if (!db.objectStoreNames.contains('appeals')) {
+        const appealStore = db.createObjectStore('appeals', { keyPath: 'id' });
+        appealStore.createIndex('by-batchId', 'batchId');
+        appealStore.createIndex('by-anomalyId', 'anomalyId');
+        appealStore.createIndex('by-status', 'status');
+        appealStore.createIndex('by-employeeId', 'employeeId');
+        appealStore.createIndex('by-createdAt', 'createdAt');
+        appealStore.createIndex('by-batchId-status', ['batchId', 'status']);
+        appealStore.createIndex('by-batchId-createdAt', ['batchId', 'createdAt']);
+      }
     },
   });
 
@@ -218,7 +243,7 @@ export const batchOperations = {
 
   async delete(id: string): Promise<void> {
     const db = await getDB();
-    const tx = db.transaction(['batches', 'schedules', 'punches', 'leaves', 'anomalies', 'corrections', 'matchedRecords', 'auditLogs', 'auditExportSnapshots'], 'readwrite');
+    const tx = db.transaction(['batches', 'schedules', 'punches', 'leaves', 'anomalies', 'corrections', 'matchedRecords', 'auditLogs', 'auditExportSnapshots', 'appeals'], 'readwrite');
     
     await tx.objectStore('batches').delete(id);
     
@@ -268,6 +293,12 @@ export const batchOperations = {
     while (snapshotCursor) {
       await snapshotCursor.delete();
       snapshotCursor = await snapshotCursor.continue();
+    }
+    
+    let appealCursor = await tx.objectStore('appeals').index('by-batchId').openCursor(IDBKeyRange.only(id));
+    while (appealCursor) {
+      await appealCursor.delete();
+      appealCursor = await appealCursor.continue();
     }
     
     await tx.done;
@@ -636,6 +667,74 @@ export const presetOperations = {
     const db = await getDB();
     const tx = db.transaction('presets', 'readwrite');
     await Promise.all(presets.map(p => tx.store.put(p)));
+    await tx.done;
+  },
+};
+
+export const appealOperations = {
+  async getAll(): Promise<Appeal[]> {
+    const db = await getDB();
+    return db.getAllFromIndex('appeals', 'by-createdAt');
+  },
+
+  async getByBatchId(batchId: string): Promise<Appeal[]> {
+    const db = await getDB();
+    const appeals = await db.getAllFromIndex('appeals', 'by-batchId', batchId);
+    return appeals.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  },
+
+  async getByBatchIdAndStatus(batchId: string, status: string): Promise<Appeal[]> {
+    const db = await getDB();
+    const appeals = await db.getAllFromIndex('appeals', 'by-batchId-status', [batchId, status]);
+    return appeals.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  },
+
+  async getByAnomalyId(anomalyId: string): Promise<Appeal[]> {
+    const db = await getDB();
+    return db.getAllFromIndex('appeals', 'by-anomalyId', anomalyId);
+  },
+
+  async getPendingByAnomalyId(anomalyId: string): Promise<Appeal | undefined> {
+    const db = await getDB();
+    const appeals = await db.getAllFromIndex('appeals', 'by-anomalyId', anomalyId);
+    return appeals.find(a => a.status === 'pending');
+  },
+
+  async getById(id: string): Promise<Appeal | undefined> {
+    const db = await getDB();
+    return db.get('appeals', id);
+  },
+
+  async add(appeal: Appeal): Promise<string> {
+    const db = await getDB();
+    return db.add('appeals', appeal) as Promise<string>;
+  },
+
+  async update(appeal: Appeal): Promise<string> {
+    const db = await getDB();
+    return db.put('appeals', appeal) as Promise<string>;
+  },
+
+  async delete(id: string): Promise<void> {
+    const db = await getDB();
+    await db.delete('appeals', id);
+  },
+
+  async clearByBatchId(batchId: string): Promise<void> {
+    const db = await getDB();
+    const tx = db.transaction('appeals', 'readwrite');
+    let cursor = await tx.store.index('by-batchId').openCursor(IDBKeyRange.only(batchId));
+    while (cursor) {
+      await cursor.delete();
+      cursor = await cursor.continue();
+    }
+    await tx.done;
+  },
+
+  async addMany(appeals: Appeal[]): Promise<void> {
+    const db = await getDB();
+    const tx = db.transaction('appeals', 'readwrite');
+    await Promise.all(appeals.map(a => tx.store.add(a)));
     await tx.done;
   },
 };

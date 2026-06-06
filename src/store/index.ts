@@ -22,6 +22,11 @@ import type {
   PresetSaveResult,
   PresetApplyResult,
   PresetActionType,
+  Appeal,
+  AppealStatus,
+  AppealCreateParams,
+  AppealReviewParams,
+  AppealConflict,
 } from '../types';
 import { generateId, getDefaultTimezone } from '../utils/dateUtils';
 import {
@@ -36,6 +41,7 @@ import {
   auditLogOperations,
   auditExportSnapshotOperations,
   presetOperations,
+  appealOperations,
 } from '../db';
 import { initializeRuleVersions } from '../modules/rules';
 import { revertCorrection } from '../modules/correction';
@@ -61,6 +67,14 @@ import {
   forceImportPreset,
   generatePresetSummary,
 } from '../modules/presets';
+import {
+  createAppeal,
+  approveAppeal,
+  rejectAppeal,
+  revokeAppeal,
+  getAppealsByBatchId,
+  checkConflicts,
+} from '../modules/appeal';
 
 interface AppState {
   initialized: boolean;
@@ -77,6 +91,7 @@ interface AppState {
   auditLogs: AuditLogEntry[];
   exportSnapshots: AuditExportSnapshot[];
   presets: Preset[];
+  appeals: Appeal[];
   loading: boolean;
   error: string | null;
   
@@ -143,6 +158,22 @@ interface AppState {
     oldPreset?: Preset;
     metadata?: Record<string, any>;
   }) => Promise<AuditLogEntry>;
+
+  loadAppeals: (batchId: string, status?: AppealStatus) => Promise<void>;
+  createAppeal: (params: AppealCreateParams) => Promise<{ success: boolean; appeal?: Appeal; conflicts?: AppealConflict[] }>;
+  approveAppeal: (params: AppealReviewParams) => Promise<{ success: boolean; appeal?: Appeal; conflicts?: AppealConflict[] }>;
+  rejectAppeal: (params: AppealReviewParams) => Promise<{ success: boolean; appeal?: Appeal; conflicts?: AppealConflict[] }>;
+  revokeAppeal: (appealId: string, operator?: string) => Promise<{ success: boolean; appeal?: Appeal; conflicts?: AppealConflict[] }>;
+  checkAppealConflicts: (anomalyId: string) => Promise<AppealConflict[]>;
+  recordAppealAuditLog: (params: {
+    batchId: string;
+    action: 'appeal_create' | 'appeal_approve' | 'appeal_reject' | 'appeal_revoke' | 'appeal_auto_correct';
+    appeal: Appeal;
+    operator?: string;
+    success: boolean;
+    errorMessage?: string;
+    metadata?: Record<string, any>;
+  }) => Promise<AuditLogEntry>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -160,6 +191,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   auditLogs: [],
   exportSnapshots: [],
   presets: [],
+  appeals: [],
   loading: false,
   error: null,
 
@@ -231,7 +263,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       set({ loading: true, currentBatchId: batchId });
       
-      const [schedules, punches, leaves, anomalies, corrections, matchedRecords, auditLogs, exportSnapshots] = await Promise.all([
+      const [schedules, punches, leaves, anomalies, corrections, matchedRecords, auditLogs, exportSnapshots, appeals] = await Promise.all([
         scheduleOperations.getByBatchId(batchId),
         punchOperations.getByBatchId(batchId),
         leaveOperations.getByBatchId(batchId),
@@ -240,6 +272,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         matchedRecordOperations.getByBatchId(batchId),
         auditLogOperations.getByBatchId(batchId),
         auditExportSnapshotOperations.getByBatchId(batchId),
+        appealOperations.getByBatchId(batchId),
       ]);
       
       set({
@@ -251,6 +284,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         matchedRecords,
         auditLogs: auditLogs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()),
         exportSnapshots: exportSnapshots.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()),
+        appeals: appeals.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
         loading: false,
       });
     } catch (error) {
@@ -497,6 +531,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       anomalies: [],
       matchedRecords: [],
       corrections: [],
+      appeals: [],
     });
   },
 
@@ -864,6 +899,301 @@ export const useAppStore = create<AppState>((set, get) => ({
         ...params.metadata,
       },
       linkedEntityIds: {},
+    });
+  },
+
+  loadAppeals: async (batchId: string, status?: AppealStatus) => {
+    try {
+      const appeals = await getAppealsByBatchId(batchId, status);
+      set({ appeals: appeals.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()) });
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : '加载申诉记录失败' });
+    }
+  },
+
+  checkAppealConflicts: async (anomalyId: string) => {
+    return checkConflicts(anomalyId);
+  },
+
+  createAppeal: async (params: AppealCreateParams) => {
+    const state = get();
+    const currentBatch = state.getCurrentBatch();
+    const statsBefore = state.getCurrentStatsSnapshot();
+    let success = false;
+    let errorMessage: string | undefined;
+
+    const result = await createAppeal(params);
+
+    if (result.success && result.appeal) {
+      set(state => ({
+        appeals: [result.appeal!, ...state.appeals].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+      }));
+      success = true;
+
+      await get().recordAppealAuditLog({
+        batchId: result.appeal.batchId,
+        action: 'appeal_create',
+        appeal: result.appeal,
+        operator: params.operator,
+        success: true,
+        metadata: {
+          anomalyId: params.anomalyId,
+          reason: params.reason,
+          correctionType: params.correctionType,
+          evidenceCount: params.evidence?.length || 0,
+        },
+      });
+    } else if (result.conflicts && result.conflicts.length > 0) {
+      errorMessage = result.conflicts.map(c => c.message).join('; ');
+    } else {
+      errorMessage = '创建申诉失败';
+    }
+
+    if (!success) {
+      const batchId = currentBatch?.id || (await anomalyOperations.getById(params.anomalyId))?.batchId;
+      if (batchId) {
+        await get().recordAppealAuditLog({
+          batchId,
+          action: 'appeal_create',
+          appeal: {} as Appeal,
+          operator: params.operator,
+          success: false,
+          errorMessage,
+          metadata: {
+            anomalyId: params.anomalyId,
+            reason: params.reason,
+            conflicts: result.conflicts,
+          },
+        });
+      }
+    }
+
+    return result;
+  },
+
+  approveAppeal: async (params: AppealReviewParams) => {
+    const state = get();
+    let success = false;
+    let errorMessage: string | undefined;
+
+    const result = await approveAppeal(params);
+
+    if (result.success && result.appeal) {
+      set(storeState => ({
+        appeals: storeState.appeals.map(a => a.id === result.appeal!.id ? result.appeal! : a),
+      }));
+
+      if (result.correction) {
+        await state.addCorrection(result.correction);
+        await state.loadAppeals(result.appeal.batchId);
+
+        const currentBatchId = state.currentBatchId;
+        if (currentBatchId === result.appeal.batchId) {
+          const [anomalies, corrections] = await Promise.all([
+            anomalyOperations.getByBatchId(currentBatchId),
+            correctionOperations.getByBatchId(currentBatchId),
+          ]);
+          set({ anomalies, corrections });
+
+          const pendingCount = anomalies.filter(a => a.status === 'pending').length;
+          const correctedCount = anomalies.filter(a => 
+            a.status === 'corrected' || a.status === 'ignored' || a.status === 'confirmed'
+          ).length;
+
+          await state.updateBatchStats(currentBatchId, {
+            totalAnomalies: anomalies.length,
+            pendingAnomalies: pendingCount,
+            correctedAnomalies: correctedCount,
+          });
+        }
+
+        await get().recordAppealAuditLog({
+          batchId: result.appeal.batchId,
+          action: 'appeal_auto_correct',
+          appeal: result.appeal,
+          operator: params.operator,
+          success: true,
+          metadata: {
+            correctionId: result.correction.id,
+            correctionType: result.correction.type,
+            anomalyId: result.appeal.anomalyId,
+          },
+        });
+      }
+
+      success = true;
+
+      await get().recordAppealAuditLog({
+        batchId: result.appeal.batchId,
+        action: 'appeal_approve',
+        appeal: result.appeal,
+        operator: params.operator,
+        success: true,
+        metadata: {
+          comment: params.comment,
+          anomalyId: result.appeal.anomalyId,
+          correctionId: result.correction?.id,
+        },
+      });
+    } else if (result.conflicts && result.conflicts.length > 0) {
+      errorMessage = result.conflicts.map(c => c.message).join('; ');
+    } else {
+      errorMessage = '审批申诉失败';
+    }
+
+    if (!success) {
+      const appeal = await appealOperations.getById(params.appealId);
+      if (appeal) {
+        await get().recordAppealAuditLog({
+          batchId: appeal.batchId,
+          action: 'appeal_approve',
+          appeal,
+          operator: params.operator,
+          success: false,
+          errorMessage,
+          metadata: {
+            comment: params.comment,
+            conflicts: result.conflicts,
+          },
+        });
+      }
+    }
+
+    return result;
+  },
+
+  rejectAppeal: async (params: AppealReviewParams) => {
+    const state = get();
+    let success = false;
+    let errorMessage: string | undefined;
+
+    const result = await rejectAppeal(params);
+
+    if (result.success && result.appeal) {
+      set(storeState => ({
+        appeals: storeState.appeals.map(a => a.id === result.appeal!.id ? result.appeal! : a),
+      }));
+      success = true;
+
+      await get().recordAppealAuditLog({
+        batchId: result.appeal.batchId,
+        action: 'appeal_reject',
+        appeal: result.appeal,
+        operator: params.operator,
+        success: true,
+        metadata: {
+          comment: params.comment,
+          anomalyId: result.appeal.anomalyId,
+        },
+      });
+    } else if (result.conflicts && result.conflicts.length > 0) {
+      errorMessage = result.conflicts.map(c => c.message).join('; ');
+    } else {
+      errorMessage = '驳回申诉失败';
+    }
+
+    if (!success) {
+      const appeal = await appealOperations.getById(params.appealId);
+      if (appeal) {
+        await get().recordAppealAuditLog({
+          batchId: appeal.batchId,
+          action: 'appeal_reject',
+          appeal,
+          operator: params.operator,
+          success: false,
+          errorMessage,
+          metadata: {
+            comment: params.comment,
+            conflicts: result.conflicts,
+          },
+        });
+      }
+    }
+
+    return result;
+  },
+
+  revokeAppeal: async (appealId: string, operator?: string) => {
+    const state = get();
+    let success = false;
+    let errorMessage: string | undefined;
+
+    const result = await revokeAppeal(appealId, operator);
+
+    if (result.success && result.appeal) {
+      set(storeState => ({
+        appeals: storeState.appeals.map(a => a.id === result.appeal!.id ? result.appeal! : a),
+      }));
+      success = true;
+
+      await get().recordAppealAuditLog({
+        batchId: result.appeal.batchId,
+        action: 'appeal_revoke',
+        appeal: result.appeal,
+        operator,
+        success: true,
+        metadata: {
+          anomalyId: result.appeal.anomalyId,
+        },
+      });
+    } else if (result.conflicts && result.conflicts.length > 0) {
+      errorMessage = result.conflicts.map(c => c.message).join('; ');
+    } else {
+      errorMessage = '撤销申诉失败';
+    }
+
+    if (!success) {
+      const appeal = await appealOperations.getById(appealId);
+      if (appeal) {
+        await get().recordAppealAuditLog({
+          batchId: appeal.batchId,
+          action: 'appeal_revoke',
+          appeal,
+          operator,
+          success: false,
+          errorMessage,
+          metadata: {
+            conflicts: result.conflicts,
+          },
+        });
+      }
+    }
+
+    return result;
+  },
+
+  recordAppealAuditLog: async (params) => {
+    const state = get();
+    const currentBatch = state.batches.find(b => b.id === params.batchId);
+    const statsBefore = createStatsSnapshot(currentBatch?.stats, state.anomalies);
+
+    const actionDescriptions: Record<string, string> = {
+      appeal_create: '发起申诉',
+      appeal_approve: '通过申诉',
+      appeal_reject: '驳回申诉',
+      appeal_revoke: '撤销申诉',
+      appeal_auto_correct: '申诉自动修正',
+    };
+
+    return createAuditLog({
+      batchId: params.batchId,
+      action: params.action,
+      operator: params.operator || 'user',
+      description: `${actionDescriptions[params.action] || params.action}：${params.appeal.employeeName || params.appeal.employeeId} - ${params.appeal.anomalyDescription.slice(0, 50)}`,
+      success: params.success,
+      errorMessage: params.errorMessage,
+      statsBefore,
+      statsAfter: statsBefore,
+      metadata: {
+        appealId: params.appeal.id,
+        anomalyId: params.appeal.anomalyId,
+        statusBefore: params.appeal.metadata?.stateTransition?.statusBefore,
+        statusAfter: params.appeal.metadata?.stateTransition?.statusAfter,
+        ...params.metadata,
+      },
+      linkedEntityIds: {
+        anomalyIds: [params.appeal.anomalyId],
+      },
     });
   },
 }));

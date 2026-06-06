@@ -37,6 +37,11 @@ const ACTION_LABELS: Record<AuditActionType, string> = {
   preset_duplicate: '复制预设',
   preset_import: '导入预设',
   preset_export: '导出预设',
+  appeal_create: '发起申诉',
+  appeal_approve: '通过申诉',
+  appeal_reject: '驳回申诉',
+  appeal_revoke: '撤销申诉',
+  appeal_auto_correct: '申诉自动修正',
 };
 
 export const createStatsSnapshot = (

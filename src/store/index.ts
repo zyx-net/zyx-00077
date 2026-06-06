@@ -14,6 +14,14 @@ import type {
   AuditExportSnapshot,
   AuditStatsSnapshot,
   AuditActionType,
+  Preset,
+  PresetType,
+  ImportPresetConfig,
+  ExportPresetConfig,
+  PresetConflict,
+  PresetSaveResult,
+  PresetApplyResult,
+  PresetActionType,
 } from '../types';
 import { generateId, getDefaultTimezone } from '../utils/dateUtils';
 import {
@@ -27,6 +35,7 @@ import {
   ruleVersionOperations,
   auditLogOperations,
   auditExportSnapshotOperations,
+  presetOperations,
 } from '../db';
 import { initializeRuleVersions } from '../modules/rules';
 import { revertCorrection } from '../modules/correction';
@@ -39,6 +48,19 @@ import {
   restoreToSnapshot,
   createExportSnapshot,
 } from '../modules/audit';
+import {
+  savePreset,
+  updatePreset,
+  duplicatePreset,
+  deletePreset,
+  getPresets,
+  getPresetById,
+  applyPreset,
+  exportPresetsToJSON,
+  importPresetsFromJSON,
+  forceImportPreset,
+  generatePresetSummary,
+} from '../modules/presets';
 
 interface AppState {
   initialized: boolean;
@@ -54,6 +76,7 @@ interface AppState {
   activeRuleVersion: RuleVersion | null;
   auditLogs: AuditLogEntry[];
   exportSnapshots: AuditExportSnapshot[];
+  presets: Preset[];
   loading: boolean;
   error: string | null;
   
@@ -98,6 +121,28 @@ interface AppState {
   checkRestoreConflicts: (snapshotId: string) => Promise<import('../types').RestoreCheckResult>;
   restoreToSnapshot: (snapshotId: string, force?: boolean) => Promise<{ success: boolean; message: string; conflicts?: import('../types').RestoreCheckResult['conflicts'] }>;
   incrementStatsVersion: (batchId: string) => Promise<number>;
+
+  loadPresets: (type?: PresetType) => Promise<void>;
+  saveImportPreset: (params: { name: string; description?: string; config: ImportPresetConfig; overwrite?: boolean; operator?: string }) => Promise<PresetSaveResult>;
+  saveExportPreset: (params: { name: string; description?: string; config: ExportPresetConfig; overwrite?: boolean; operator?: string }) => Promise<PresetSaveResult>;
+  updatePreset: (params: { id: string; name?: string; description?: string; config?: ImportPresetConfig | ExportPresetConfig; operator?: string }) => Promise<Preset | null>;
+  renamePreset: (presetId: string, newName: string, operator?: string) => Promise<Preset | null>;
+  duplicatePreset: (presetId: string, newName: string, operator?: string) => Promise<Preset | null>;
+  deletePreset: (presetId: string, operator?: string) => Promise<boolean>;
+  applyPreset: (presetId: string, force?: boolean, operator?: string) => Promise<PresetApplyResult>;
+  exportPresetsToJSON: (presetIds?: string[]) => ReturnType<typeof exportPresetsToJSON>;
+  importPresetsFromJSON: (jsonData: Awaited<ReturnType<typeof exportPresetsToJSON>>, operator?: string) => ReturnType<typeof importPresetsFromJSON>;
+  forceImportPreset: (presetData: Preset, overwrite: boolean, operator?: string) => Promise<Preset>;
+  recordPresetAuditLog: (params: {
+    batchId?: string;
+    action: PresetActionType;
+    preset: Preset;
+    operator?: string;
+    success: boolean;
+    errorMessage?: string;
+    oldPreset?: Preset;
+    metadata?: Record<string, any>;
+  }) => Promise<AuditLogEntry>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -114,6 +159,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeRuleVersion: null,
   auditLogs: [],
   exportSnapshots: [],
+  presets: [],
   loading: false,
   error: null,
 
@@ -123,6 +169,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       await initializeRuleVersions();
       await get().loadBatches();
       await get().loadRuleVersions();
+      await get().loadPresets();
       set({ initialized: true, loading: false });
     } catch (error) {
       set({ error: error instanceof Error ? error.message : '初始化失败', loading: false });
@@ -572,5 +619,251 @@ export const useAppStore = create<AppState>((set, get) => ({
       await get().loadBatches();
     }
     return newVersion;
+  },
+
+  loadPresets: async (type?: PresetType) => {
+    try {
+      const presets = await getPresets(type);
+      set({ presets });
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : '加载预设失败' });
+    }
+  },
+
+  saveImportPreset: async (params) => {
+    const result = await savePreset({
+      name: params.name,
+      description: params.description,
+      type: 'import',
+      config: params.config,
+      operator: params.operator,
+    }, params.overwrite);
+
+    if (result.success && result.preset) {
+      await get().loadPresets();
+      const action = params.overwrite ? 'preset_overwrite' : 'preset_save';
+      await get().recordPresetAuditLog({
+        action,
+        preset: result.preset,
+        operator: params.operator,
+        success: true,
+        metadata: { config: generatePresetSummary(result.preset) },
+      });
+    }
+
+    return result;
+  },
+
+  saveExportPreset: async (params) => {
+    const result = await savePreset({
+      name: params.name,
+      description: params.description,
+      type: 'export',
+      config: params.config,
+      operator: params.operator,
+    }, params.overwrite);
+
+    if (result.success && result.preset) {
+      await get().loadPresets();
+      const action = params.overwrite ? 'preset_overwrite' : 'preset_save';
+      await get().recordPresetAuditLog({
+        action,
+        preset: result.preset,
+        operator: params.operator,
+        success: true,
+        metadata: { config: generatePresetSummary(result.preset) },
+      });
+    }
+
+    return result;
+  },
+
+  updatePreset: async (params) => {
+    const oldPreset = await getPresetById(params.id);
+    const result = await updatePreset(params);
+    
+    if (result) {
+      await get().loadPresets();
+      await get().recordPresetAuditLog({
+        action: 'preset_rename',
+        preset: result,
+        operator: params.operator,
+        success: true,
+        oldPreset,
+        metadata: {
+          oldConfig: oldPreset ? generatePresetSummary(oldPreset) : undefined,
+          newConfig: generatePresetSummary(result),
+        },
+      });
+    }
+    
+    return result;
+  },
+
+  renamePreset: async (presetId: string, newName: string, operator?: string) => {
+    return get().updatePreset({ id: presetId, name: newName, operator });
+  },
+
+  duplicatePreset: async (presetId: string, newName: string, operator?: string) => {
+    const oldPreset = await getPresetById(presetId);
+    const result = await duplicatePreset(presetId, newName, operator);
+    
+    if (result) {
+      await get().loadPresets();
+      await get().recordPresetAuditLog({
+        action: 'preset_duplicate',
+        preset: result,
+        operator,
+        success: true,
+        metadata: {
+          duplicatedFrom: presetId,
+          oldName: oldPreset?.name,
+          newName: result.name,
+          config: generatePresetSummary(result),
+        },
+      });
+    }
+    
+    return result;
+  },
+
+  deletePreset: async (presetId: string, operator?: string) => {
+    const preset = await getPresetById(presetId);
+    if (!preset) return false;
+
+    const result = await deletePreset(presetId);
+    
+    if (result) {
+      await get().loadPresets();
+      await get().recordPresetAuditLog({
+        action: 'preset_delete',
+        preset,
+        operator,
+        success: true,
+        metadata: {
+          deletedConfig: generatePresetSummary(preset),
+        },
+      });
+    }
+    
+    return result;
+  },
+
+  applyPreset: async (presetId: string, force: boolean = false, operator?: string) => {
+    const result = await applyPreset(presetId);
+    
+    if (result.success && result.preset) {
+      await get().recordPresetAuditLog({
+        action: 'preset_apply',
+        preset: result.preset,
+        operator,
+        success: true,
+        metadata: {
+          config: generatePresetSummary(result.preset),
+          force,
+          conflicts: result.conflicts,
+        },
+      });
+    } else if (result.requiresConfirmation && force && result.preset) {
+      await get().recordPresetAuditLog({
+        action: 'preset_apply',
+        preset: result.preset,
+        operator,
+        success: true,
+        metadata: {
+          config: generatePresetSummary(result.preset),
+          force: true,
+          conflicts: result.conflicts,
+        },
+      });
+      return { ...result, success: true };
+    }
+    
+    return result;
+  },
+
+  exportPresetsToJSON: async (presetIds?: string[]) => {
+    const result = await exportPresetsToJSON(presetIds);
+    
+    await get().recordPresetAuditLog({
+      action: 'preset_export',
+      preset: result.presets[0] || { id: 'batch-export', name: '导出预设', type: 'import', config: {} as ImportPresetConfig, version: 1, schemaVersion: 1, createdAt: new Date(), updatedAt: new Date(), createdBy: 'system', metadata: {} },
+      success: true,
+      metadata: {
+        exportCount: result.presets.length,
+        presetIds,
+      },
+    });
+    
+    return result;
+  },
+
+  importPresetsFromJSON: async (jsonData: any, operator?: string) => {
+    const result = await importPresetsFromJSON(jsonData, operator);
+    
+    if (result.imported.length > 0) {
+      await get().loadPresets();
+    }
+    
+    for (const preset of result.imported) {
+      await get().recordPresetAuditLog({
+        action: 'preset_import',
+        preset,
+        operator,
+        success: true,
+        metadata: {
+          config: generatePresetSummary(preset),
+          importedFrom: preset.metadata?.importedFrom,
+        },
+      });
+    }
+    
+    return result;
+  },
+
+  forceImportPreset: async (presetData: Preset, overwrite: boolean, operator?: string) => {
+    const result = await forceImportPreset(presetData, overwrite, operator);
+    
+    if (result) {
+      await get().loadPresets();
+      await get().recordPresetAuditLog({
+        action: 'preset_import',
+        preset: result,
+        operator,
+        success: true,
+        metadata: {
+          overwrite,
+          config: generatePresetSummary(result),
+          originalName: presetData.name,
+        },
+      });
+    }
+    
+    return result;
+  },
+
+  recordPresetAuditLog: async (params) => {
+    const state = get();
+    const emptyStats = createStatsSnapshot(undefined, []);
+    
+    return createAuditLog({
+      batchId: params.batchId || state.currentBatchId || 'global',
+      action: params.action,
+      operator: params.operator || 'user',
+      description: `预设${params.action === 'preset_save' ? '保存' : params.action === 'preset_apply' ? '套用' : params.action === 'preset_overwrite' ? '覆盖' : params.action === 'preset_rename' ? '重命名' : params.action === 'preset_delete' ? '删除' : params.action === 'preset_duplicate' ? '复制' : params.action === 'preset_import' ? '导入' : '导出'}：${params.preset.name}`,
+      success: params.success,
+      errorMessage: params.errorMessage,
+      statsBefore: emptyStats,
+      statsAfter: emptyStats,
+      metadata: {
+        presetId: params.preset.id,
+        presetType: params.preset.type,
+        presetVersion: params.preset.version,
+        oldConfig: params.oldPreset ? generatePresetSummary(params.oldPreset) : undefined,
+        newConfig: generatePresetSummary(params.preset),
+        ...params.metadata,
+      },
+      linkedEntityIds: {},
+    });
   },
 }));

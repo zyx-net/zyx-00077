@@ -29,6 +29,14 @@ const ACTION_LABELS: Record<AuditActionType, string> = {
   batch_create: '创建批次',
   batch_delete: '删除批次',
   restore: '恢复数据',
+  preset_save: '保存预设',
+  preset_apply: '套用预设',
+  preset_overwrite: '覆盖预设',
+  preset_rename: '重命名预设',
+  preset_delete: '删除预设',
+  preset_duplicate: '复制预设',
+  preset_import: '导入预设',
+  preset_export: '导出预设',
 };
 
 export const createStatsSnapshot = (

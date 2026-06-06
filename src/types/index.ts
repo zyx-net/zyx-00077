@@ -250,6 +250,24 @@ export interface ImportPreview {
   fileName: string;
 }
 
+export type PresetType = 'import' | 'export';
+
+export type PresetConflictType = 
+  | 'name_exists' 
+  | 'version_incompatible' 
+  | 'missing_fields' 
+  | 'rules_changed';
+
+export type PresetActionType =
+  | 'preset_save'
+  | 'preset_apply'
+  | 'preset_overwrite'
+  | 'preset_rename'
+  | 'preset_delete'
+  | 'preset_duplicate'
+  | 'preset_import'
+  | 'preset_export';
+
 export type AuditActionType = 
   | 'import' 
   | 'rule_switch' 
@@ -259,7 +277,61 @@ export type AuditActionType =
   | 'analyze' 
   | 'batch_create' 
   | 'batch_delete'
-  | 'restore';
+  | 'restore'
+  | PresetActionType;
+
+export interface ImportPresetConfig {
+  fieldMapping: FieldMapping;
+  timezone: string;
+  duplicatePunchWindowMinutes: number;
+}
+
+export interface ExportPresetConfig {
+  format: 'html' | 'markdown' | 'excel' | 'csv';
+  title: string;
+  includeCharts: boolean;
+  includeAuditSummary: boolean;
+  includeRawData?: boolean;
+  includeCorrections?: boolean;
+}
+
+export interface Preset<T = ImportPresetConfig | ExportPresetConfig> {
+  id: string;
+  name: string;
+  description?: string;
+  type: PresetType;
+  config: T;
+  version: number;
+  schemaVersion: number;
+  ruleVersionId?: string;
+  ruleVersionName?: string;
+  createdAt: Date;
+  updatedAt: Date;
+  createdBy: string;
+  metadata: Record<string, any>;
+}
+
+export interface PresetConflict {
+  type: PresetConflictType;
+  message: string;
+  details?: any;
+}
+
+export interface PresetApplyResult {
+  success: boolean;
+  preset?: Preset;
+  conflicts?: PresetConflict[];
+  requiresConfirmation: boolean;
+}
+
+export interface PresetSaveResult {
+  success: boolean;
+  preset?: Preset;
+  conflicts?: PresetConflict[];
+  requiresConfirmation: boolean;
+}
+
+export const PRESET_SCHEMA_VERSION = 1;
 
 export interface AuditStatsSnapshot {
   totalSchedules: number;

@@ -10,10 +10,11 @@ import type {
   MatchedRecord,
   AuditLogEntry,
   AuditExportSnapshot,
+  Preset,
 } from '../types';
 
 const DB_NAME = 'attendance-reconciliation-db';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 export interface DBSchema {
   batches: {
@@ -65,6 +66,11 @@ export interface DBSchema {
     key: string;
     value: AuditExportSnapshot;
     indexes: { 'by-batchId': string; 'by-timestamp': Date; 'by-exportId': string };
+  };
+  presets: {
+    key: string;
+    value: Preset;
+    indexes: { 'by-type': string; 'by-name': string; 'by-createdAt': Date; 'by-type-createdAt': [string, Date] };
   };
 }
 
@@ -145,6 +151,14 @@ export const initDB = async (): Promise<IDBPDatabase<DBSchema>> => {
         snapshotStore.createIndex('by-batchId', 'batchId');
         snapshotStore.createIndex('by-timestamp', 'timestamp');
         snapshotStore.createIndex('by-exportId', 'exportId');
+      }
+
+      if (!db.objectStoreNames.contains('presets')) {
+        const presetStore = db.createObjectStore('presets', { keyPath: 'id' });
+        presetStore.createIndex('by-type', 'type');
+        presetStore.createIndex('by-name', 'name');
+        presetStore.createIndex('by-createdAt', 'createdAt');
+        presetStore.createIndex('by-type-createdAt', ['type', 'createdAt']);
       }
     },
   });
@@ -566,6 +580,62 @@ export const auditExportSnapshotOperations = {
       await cursor.delete();
       cursor = await cursor.continue();
     }
+    await tx.done;
+  },
+};
+
+export const presetOperations = {
+  async getAll(): Promise<Preset[]> {
+    const db = await getDB();
+    return db.getAllFromIndex('presets', 'by-createdAt');
+  },
+
+  async getByType(type: string): Promise<Preset[]> {
+    const db = await getDB();
+    const all = await db.getAllFromIndex('presets', 'by-type', type);
+    return all.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  },
+
+  async getById(id: string): Promise<Preset | undefined> {
+    const db = await getDB();
+    return db.get('presets', id);
+  },
+
+  async getByName(name: string, type?: string): Promise<Preset | undefined> {
+    const db = await getDB();
+    const all = await db.getAllFromIndex('presets', 'by-name', name);
+    if (type) {
+      return all.find(p => p.type === type);
+    }
+    return all[0];
+  },
+
+  async add(preset: Preset): Promise<string> {
+    const db = await getDB();
+    return db.add('presets', preset) as Promise<string>;
+  },
+
+  async update(preset: Preset): Promise<string> {
+    const db = await getDB();
+    return db.put('presets', preset) as Promise<string>;
+  },
+
+  async delete(id: string): Promise<void> {
+    const db = await getDB();
+    await db.delete('presets', id);
+  },
+
+  async clear(): Promise<void> {
+    const db = await getDB();
+    const tx = db.transaction('presets', 'readwrite');
+    await tx.store.clear();
+    await tx.done;
+  },
+
+  async addMany(presets: Preset[]): Promise<void> {
+    const db = await getDB();
+    const tx = db.transaction('presets', 'readwrite');
+    await Promise.all(presets.map(p => tx.store.put(p)));
     await tx.done;
   },
 };

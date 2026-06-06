@@ -1,0 +1,11 @@
+{
+  "timezone": "Asia/Shanghai",
+  "gracePeriodMinutes": 10,
+  "duplicateWindowMinutes": 5,
+  "overtimeThresholdMinutes": 60,
+  "workDayStartHour": 9,
+  "workDayEndHour": 18,
+  "autoDetectCrossDay": true,
+  "crossDayThresholdHour": 3,
+  "description": "正确的时区配置 - 使用Asia/Shanghai时区"
+}

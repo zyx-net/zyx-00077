@@ -1,0 +1,11 @@
+{
+  "timezone": "UTC",
+  "gracePeriodMinutes": 10,
+  "duplicateWindowMinutes": 5,
+  "overtimeThresholdMinutes": 60,
+  "workDayStartHour": 9,
+  "workDayEndHour": 18,
+  "autoDetectCrossDay": false,
+  "crossDayThresholdHour": 3,
+  "description": "错误的时区配置 - 使用UTC时区，应该使用Asia/Shanghai"
+}

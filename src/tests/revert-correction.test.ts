@@ -78,6 +78,7 @@ describe('修正撤回回归测试 - 完整链路', () => {
         pendingAnomalies: 3,
         correctedAnomalies: 0,
       },
+      statsVersion: 1,
     };
     await batchOperations.add(testBatch);
 

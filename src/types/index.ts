@@ -16,6 +16,7 @@ export interface Batch {
   fieldMapping: FieldMapping;
   stats: BatchStats;
   timezone: string;
+  statsVersion: number;
 }
 
 export interface FieldMapping {
@@ -247,4 +248,83 @@ export interface ImportPreview {
   rowCount: number;
   fileType: FileType;
   fileName: string;
+}
+
+export type AuditActionType = 
+  | 'import' 
+  | 'rule_switch' 
+  | 'correction' 
+  | 'revert_correction' 
+  | 'export' 
+  | 'analyze' 
+  | 'batch_create' 
+  | 'batch_delete'
+  | 'restore';
+
+export interface AuditStatsSnapshot {
+  totalSchedules: number;
+  totalPunches: number;
+  totalLeaves: number;
+  totalAnomalies: number;
+  pendingAnomalies: number;
+  correctedAnomalies: number;
+  byType?: Record<string, number>;
+  bySeverity?: Record<string, number>;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  batchId: string;
+  action: AuditActionType;
+  operator: string;
+  timestamp: Date;
+  description: string;
+  success: boolean;
+  errorMessage?: string;
+  statsBefore: AuditStatsSnapshot;
+  statsAfter: AuditStatsSnapshot;
+  metadata: Record<string, any>;
+  linkedEntityIds: {
+    anomalyIds?: string[];
+    correctionIds?: string[];
+    ruleVersionIds?: string[];
+    exportId?: string;
+  };
+  statsVersion: number;
+}
+
+export interface AuditExportSnapshot {
+  id: string;
+  batchId: string;
+  exportId: string;
+  timestamp: Date;
+  format: string;
+  includeAuditSummary: boolean;
+  anomalies: Anomaly[];
+  corrections: Correction[];
+  batchStats: BatchStats;
+  statsVersion: number;
+  auditLogCount: number;
+}
+
+export interface RestoreCheckResult {
+  canRestore: boolean;
+  conflicts: {
+    type: 'batch_updated' | 'stats_version_mismatch' | 'data_changed' | 'not_found';
+    message: string;
+    details?: any;
+  }[];
+  currentStatsVersion: number;
+  snapshotStatsVersion: number;
+}
+
+export interface ExportOptions {
+  format: 'html' | 'markdown' | 'excel' | 'csv';
+  includeCharts?: boolean;
+  includeRawData?: boolean;
+  includeCorrections?: boolean;
+  includeAuditSummary?: boolean;
+  template?: string;
+  title?: string;
+  generatedAt?: Date;
 }

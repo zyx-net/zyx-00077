@@ -20,6 +20,7 @@ import { useToast } from '@/contexts/ToastContext';
 import importModule from '@/modules/import';
 import matchModule from '@/modules/match';
 import rulesModule from '@/modules/rules';
+import auditModule from '@/modules/audit';
 import type {
   ImportPreview,
   ImportError,
@@ -102,6 +103,10 @@ export default function ImportPage() {
     updateFieldMapping,
     updateBatchStats,
     loading,
+    recordAuditLog,
+    getCurrentStatsSnapshot,
+    analyzeAnomalies,
+    getCurrentBatch,
   } = useAppStore();
   const { showToast } = useToast();
 
@@ -119,7 +124,7 @@ export default function ImportPage() {
   const [showMappingModal, setShowMappingModal] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const currentBatch = batches.find(b => b.id === currentBatchId);
+  const currentBatch = getCurrentBatch();
 
   const handleCreateBatch = async () => {
     if (!batchName.trim()) {
@@ -265,6 +270,12 @@ export default function ImportPage() {
       return;
     }
 
+    const statsBefore = getCurrentStatsSnapshot();
+    let success = false;
+    let errorMessage: string | undefined;
+    let importCount = 0;
+    let importErrorCount = 0;
+
     setIsProcessing(true);
     setImportProgress(0);
 
@@ -305,6 +316,9 @@ export default function ImportPage() {
         }
       }
 
+      importCount = result.validRows;
+      importErrorCount = result.errors.length;
+
       setImportProgress(60);
 
       if (!result.success) {
@@ -317,6 +331,7 @@ export default function ImportPage() {
           },
         }));
         showToast('error', `导入失败，发现 ${result.errors.length} 个错误`);
+        errorMessage = `导入失败，发现 ${result.errors.length} 个错误`;
         return;
       }
 
@@ -341,6 +356,7 @@ export default function ImportPage() {
         'success',
         `${dataTypeLabels[activeTab]}导入成功，共 ${result.validRows} 条有效数据`
       );
+      success = true;
 
       setImportState(prev => ({
         ...prev,
@@ -353,14 +369,40 @@ export default function ImportPage() {
         },
       }));
     } catch (error) {
-      showToast('error', error instanceof Error ? error.message : '导入失败');
+      errorMessage = error instanceof Error ? error.message : '导入失败';
+      showToast('error', errorMessage);
     } finally {
       setIsProcessing(false);
+      const statsAfter = getCurrentStatsSnapshot();
+      await recordAuditLog({
+        batchId: currentBatchId,
+        action: 'import',
+        description: `导入${dataTypeLabels[activeTab]}：${state.file?.name || '未知文件'}，共 ${importCount} 条有效数据${importErrorCount > 0 ? `，${importErrorCount} 条错误` : ''}`,
+        success,
+        errorMessage,
+        statsBefore,
+        statsAfter,
+        metadata: {
+          dataType: activeTab,
+          fileName: state.file?.name,
+          fileType: state.preview?.fileType,
+          importCount,
+          errorCount: importErrorCount,
+          mapping: state.mapping,
+        },
+        linkedEntityIds: {},
+      });
     }
   };
 
   const handleProcessAll = async () => {
     if (!currentBatchId) return;
+
+    const statsBefore = getCurrentStatsSnapshot();
+    let success = false;
+    let errorMessage: string | undefined;
+    let matchedCount = 0;
+    let anomalyCount = 0;
 
     setIsProcessing(true);
     setImportProgress(0);
@@ -370,6 +412,7 @@ export default function ImportPage() {
 
       if (schedules.length === 0 || punches.length === 0) {
         showToast('error', '请先导入排班数据和打卡数据');
+        errorMessage = '请先导入排班数据和打卡数据';
         return;
       }
 
@@ -382,6 +425,7 @@ export default function ImportPage() {
         leaves
       );
 
+      matchedCount = matchResult.matched.length;
       await saveMatchedRecords(matchResult.matched);
 
       setImportProgress(50);
@@ -397,6 +441,7 @@ export default function ImportPage() {
         activeRuleVersion.id
       );
 
+      anomalyCount = ruleResult.anomalies.length;
       await saveAnomalies(ruleResult.anomalies);
 
       setImportProgress(80);
@@ -407,15 +452,38 @@ export default function ImportPage() {
         correctedAnomalies: 0,
       });
 
+      await analyzeAnomalies();
+
       setImportProgress(100);
       showToast(
         'success',
         `处理完成！匹配 ${matchResult.matched.length} 条记录，发现 ${ruleResult.anomalies.length} 个异常`
       );
+      success = true;
     } catch (error) {
-      showToast('error', error instanceof Error ? error.message : '处理失败');
+      errorMessage = error instanceof Error ? error.message : '处理失败';
+      showToast('error', errorMessage);
     } finally {
       setIsProcessing(false);
+      const statsAfter = getCurrentStatsSnapshot();
+      await recordAuditLog({
+        batchId: currentBatchId,
+        action: 'analyze',
+        description: `数据分析完成：匹配 ${matchedCount} 条记录，发现 ${anomalyCount} 个异常`,
+        success,
+        errorMessage,
+        statsBefore,
+        statsAfter,
+        metadata: {
+          matchedCount,
+          anomalyCount,
+          ruleVersionId: useAppStore.getState().activeRuleVersion?.id,
+          ruleVersionName: useAppStore.getState().activeRuleVersion?.name,
+        },
+        linkedEntityIds: {
+          ruleVersionIds: useAppStore.getState().activeRuleVersion?.id ? [useAppStore.getState().activeRuleVersion.id] : [],
+        },
+      });
     }
   };
 

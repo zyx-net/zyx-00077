@@ -25,6 +25,7 @@ describe('Store 集成测试 - 状态同步验证', () => {
       timezone: 'Asia/Shanghai',
       fieldMapping: { schedule: {}, punch: {}, leave: {} },
       stats: { totalSchedules: 0, totalPunches: 0, totalLeaves: 0, totalAnomalies: 0, pendingAnomalies: 0, correctedAnomalies: 0 },
+      statsVersion: 1,
     };
     await batchOperations.add(batch);
     testBatchId = batch.id;
@@ -245,6 +246,7 @@ describe('Store 集成测试 - 状态同步验证', () => {
       timezone: 'Asia/Shanghai',
       fieldMapping: { schedule: {}, punch: {}, leave: {} },
       stats: { totalSchedules: 0, totalPunches: 0, totalLeaves: 0, totalAnomalies: 0, pendingAnomalies: 0, correctedAnomalies: 0 },
+      statsVersion: 1,
     };
     await batchOperations.add(otherBatch);
 

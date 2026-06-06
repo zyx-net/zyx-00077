@@ -8,10 +8,12 @@ import type {
   Correction,
   RuleVersion,
   MatchedRecord,
+  AuditLogEntry,
+  AuditExportSnapshot,
 } from '../types';
 
 const DB_NAME = 'attendance-reconciliation-db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 export interface DBSchema {
   batches: {
@@ -53,6 +55,16 @@ export interface DBSchema {
     key: string;
     value: MatchedRecord;
     indexes: { 'by-batchId': string; 'by-employeeId': string; 'by-date': string };
+  };
+  auditLogs: {
+    key: string;
+    value: AuditLogEntry;
+    indexes: { 'by-batchId': string; 'by-timestamp': Date; 'by-action': string; 'by-batchId-timestamp': [string, Date] };
+  };
+  auditExportSnapshots: {
+    key: string;
+    value: AuditExportSnapshot;
+    indexes: { 'by-batchId': string; 'by-timestamp': Date; 'by-exportId': string };
   };
 }
 
@@ -119,6 +131,21 @@ export const initDB = async (): Promise<IDBPDatabase<DBSchema>> => {
         matchedStore.createIndex('by-employeeId', 'employeeId');
         matchedStore.createIndex('by-date', 'date');
       }
+
+      if (!db.objectStoreNames.contains('auditLogs')) {
+        const auditStore = db.createObjectStore('auditLogs', { keyPath: 'id' });
+        auditStore.createIndex('by-batchId', 'batchId');
+        auditStore.createIndex('by-timestamp', 'timestamp');
+        auditStore.createIndex('by-action', 'action');
+        auditStore.createIndex('by-batchId-timestamp', ['batchId', 'timestamp']);
+      }
+
+      if (!db.objectStoreNames.contains('auditExportSnapshots')) {
+        const snapshotStore = db.createObjectStore('auditExportSnapshots', { keyPath: 'id' });
+        snapshotStore.createIndex('by-batchId', 'batchId');
+        snapshotStore.createIndex('by-timestamp', 'timestamp');
+        snapshotStore.createIndex('by-exportId', 'exportId');
+      }
     },
   });
 
@@ -177,7 +204,7 @@ export const batchOperations = {
 
   async delete(id: string): Promise<void> {
     const db = await getDB();
-    const tx = db.transaction(['batches', 'schedules', 'punches', 'leaves', 'anomalies', 'corrections', 'matchedRecords'], 'readwrite');
+    const tx = db.transaction(['batches', 'schedules', 'punches', 'leaves', 'anomalies', 'corrections', 'matchedRecords', 'auditLogs', 'auditExportSnapshots'], 'readwrite');
     
     await tx.objectStore('batches').delete(id);
     
@@ -215,6 +242,18 @@ export const batchOperations = {
     while (matchedCursor) {
       await matchedCursor.delete();
       matchedCursor = await matchedCursor.continue();
+    }
+    
+    let auditCursor = await tx.objectStore('auditLogs').index('by-batchId').openCursor(IDBKeyRange.only(id));
+    while (auditCursor) {
+      await auditCursor.delete();
+      auditCursor = await auditCursor.continue();
+    }
+    
+    let snapshotCursor = await tx.objectStore('auditExportSnapshots').index('by-batchId').openCursor(IDBKeyRange.only(id));
+    while (snapshotCursor) {
+      await snapshotCursor.delete();
+      snapshotCursor = await snapshotCursor.continue();
     }
     
     await tx.done;
@@ -432,6 +471,96 @@ export const matchedRecordOperations = {
   async clearByBatchId(batchId: string): Promise<void> {
     const db = await getDB();
     const tx = db.transaction('matchedRecords', 'readwrite');
+    let cursor = await tx.store.index('by-batchId').openCursor(IDBKeyRange.only(batchId));
+    while (cursor) {
+      await cursor.delete();
+      cursor = await cursor.continue();
+    }
+    await tx.done;
+  },
+};
+
+export const auditLogOperations = {
+  async getByBatchId(batchId: string): Promise<AuditLogEntry[]> {
+    const db = await getDB();
+    const logs = await db.getAllFromIndex('auditLogs', 'by-batchId', batchId);
+    return logs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  },
+
+  async getByBatchIdAndAction(batchId: string, action: string): Promise<AuditLogEntry[]> {
+    const db = await getDB();
+    const allLogs = await db.getAllFromIndex('auditLogs', 'by-batchId', batchId);
+    return allLogs
+      .filter(log => log.action === action)
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  },
+
+  async getById(id: string): Promise<AuditLogEntry | undefined> {
+    const db = await getDB();
+    return db.get('auditLogs', id);
+  },
+
+  async add(log: AuditLogEntry): Promise<string> {
+    const db = await getDB();
+    return db.add('auditLogs', log) as Promise<string>;
+  },
+
+  async addMany(logs: AuditLogEntry[]): Promise<void> {
+    const db = await getDB();
+    const tx = db.transaction('auditLogs', 'readwrite');
+    await Promise.all(logs.map(l => tx.store.add(l)));
+    await tx.done;
+  },
+
+  async getLatestStatsVersion(batchId: string): Promise<number> {
+    const logs = await auditLogOperations.getByBatchId(batchId);
+    if (logs.length === 0) return 0;
+    return Math.max(...logs.map(l => l.statsVersion || 0));
+  },
+
+  async clearByBatchId(batchId: string): Promise<void> {
+    const db = await getDB();
+    const tx = db.transaction('auditLogs', 'readwrite');
+    let cursor = await tx.store.index('by-batchId').openCursor(IDBKeyRange.only(batchId));
+    while (cursor) {
+      await cursor.delete();
+      cursor = await cursor.continue();
+    }
+    await tx.done;
+  },
+};
+
+export const auditExportSnapshotOperations = {
+  async getByBatchId(batchId: string): Promise<AuditExportSnapshot[]> {
+    const db = await getDB();
+    const snapshots = await db.getAllFromIndex('auditExportSnapshots', 'by-batchId', batchId);
+    return snapshots.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  },
+
+  async getById(id: string): Promise<AuditExportSnapshot | undefined> {
+    const db = await getDB();
+    return db.get('auditExportSnapshots', id);
+  },
+
+  async getByExportId(exportId: string): Promise<AuditExportSnapshot | undefined> {
+    const db = await getDB();
+    const snapshots = await db.getAllFromIndex('auditExportSnapshots', 'by-exportId', exportId);
+    return snapshots[0];
+  },
+
+  async add(snapshot: AuditExportSnapshot): Promise<string> {
+    const db = await getDB();
+    return db.add('auditExportSnapshots', snapshot) as Promise<string>;
+  },
+
+  async delete(id: string): Promise<void> {
+    const db = await getDB();
+    await db.delete('auditExportSnapshots', id);
+  },
+
+  async clearByBatchId(batchId: string): Promise<void> {
+    const db = await getDB();
+    const tx = db.transaction('auditExportSnapshots', 'readwrite');
     let cursor = await tx.store.index('by-batchId').openCursor(IDBKeyRange.only(batchId));
     while (cursor) {
       await cursor.delete();

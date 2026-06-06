@@ -10,6 +10,10 @@ import type {
   RuleVersion,
   FieldMapping,
   BatchStats,
+  AuditLogEntry,
+  AuditExportSnapshot,
+  AuditStatsSnapshot,
+  AuditActionType,
 } from '../types';
 import { generateId, getDefaultTimezone } from '../utils/dateUtils';
 import {
@@ -21,9 +25,20 @@ import {
   correctionOperations,
   matchedRecordOperations,
   ruleVersionOperations,
+  auditLogOperations,
+  auditExportSnapshotOperations,
 } from '../db';
 import { initializeRuleVersions } from '../modules/rules';
 import { revertCorrection } from '../modules/correction';
+import {
+  createStatsSnapshot,
+  createAuditLog,
+  getBatchAuditTimeline,
+  getExportSnapshots,
+  checkRestoreConflicts,
+  restoreToSnapshot,
+  createExportSnapshot,
+} from '../modules/audit';
 
 interface AppState {
   initialized: boolean;
@@ -37,8 +52,12 @@ interface AppState {
   corrections: Correction[];
   ruleVersions: RuleVersion[];
   activeRuleVersion: RuleVersion | null;
+  auditLogs: AuditLogEntry[];
+  exportSnapshots: AuditExportSnapshot[];
   loading: boolean;
   error: string | null;
+  
+  getCurrentBatch: () => Batch | undefined;
   
   initApp: () => Promise<void>;
   loadBatches: () => Promise<void>;
@@ -68,6 +87,17 @@ interface AppState {
   clearCurrentBatchData: () => void;
   setError: (error: string | null) => void;
   setLoading: (loading: boolean) => void;
+  
+  analyzeAnomalies: () => Promise<void>;
+
+  loadAuditLogs: (batchId: string) => Promise<void>;
+  loadExportSnapshots: (batchId: string) => Promise<void>;
+  recordAuditLog: (params: import('../modules/audit').CreateAuditLogParams) => Promise<AuditLogEntry>;
+  getCurrentStatsSnapshot: () => AuditStatsSnapshot;
+  createExportSnapshot: (format: string, includeAuditSummary: boolean) => Promise<AuditExportSnapshot>;
+  checkRestoreConflicts: (snapshotId: string) => Promise<import('../types').RestoreCheckResult>;
+  restoreToSnapshot: (snapshotId: string, force?: boolean) => Promise<{ success: boolean; message: string; conflicts?: import('../types').RestoreCheckResult['conflicts'] }>;
+  incrementStatsVersion: (batchId: string) => Promise<number>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -82,6 +112,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   corrections: [],
   ruleVersions: [],
   activeRuleVersion: null,
+  auditLogs: [],
+  exportSnapshots: [],
   loading: false,
   error: null,
 
@@ -127,10 +159,24 @@ export const useAppStore = create<AppState>((set, get) => ({
         pendingAnomalies: 0,
         correctedAnomalies: 0,
       },
+      statsVersion: 0,
     };
     
     await batchOperations.add(batch);
     await get().loadBatches();
+    
+    const emptyStats = createStatsSnapshot(batch.stats);
+    await createAuditLog({
+      batchId: batch.id,
+      action: 'batch_create',
+      description: `创建批次：${name}`,
+      success: true,
+      statsBefore: emptyStats,
+      statsAfter: emptyStats,
+      metadata: { timezone: batch.timezone },
+      statsVersion: 0,
+    });
+    
     return batch;
   },
 
@@ -138,13 +184,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       set({ loading: true, currentBatchId: batchId });
       
-      const [schedules, punches, leaves, anomalies, corrections, matchedRecords] = await Promise.all([
+      const [schedules, punches, leaves, anomalies, corrections, matchedRecords, auditLogs, exportSnapshots] = await Promise.all([
         scheduleOperations.getByBatchId(batchId),
         punchOperations.getByBatchId(batchId),
         leaveOperations.getByBatchId(batchId),
         anomalyOperations.getByBatchId(batchId),
         correctionOperations.getByBatchId(batchId),
         matchedRecordOperations.getByBatchId(batchId),
+        auditLogOperations.getByBatchId(batchId),
+        auditExportSnapshotOperations.getByBatchId(batchId),
       ]);
       
       set({
@@ -154,6 +202,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         anomalies,
         corrections,
         matchedRecords,
+        auditLogs: auditLogs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()),
+        exportSnapshots: exportSnapshots.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()),
         loading: false,
       });
     } catch (error) {
@@ -405,4 +455,122 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setError: (error: string | null) => set({ error }),
   setLoading: (loading: boolean) => set({ loading }),
+
+  getCurrentBatch: () => {
+    const state = get();
+    return state.batches.find(b => b.id === state.currentBatchId);
+  },
+
+  analyzeAnomalies: async () => {
+    const state = get();
+    if (!state.currentBatchId) return;
+
+    try {
+      const { matchedRecords, activeRuleVersion, schedules, punches, leaves } = state;
+      
+      if (matchedRecords.length === 0 || !activeRuleVersion) return;
+
+      const rulesModule = await import('../modules/rules');
+      const result = await rulesModule.runAnomalyDetection(
+        matchedRecords,
+        activeRuleVersion.id
+      );
+
+      await get().saveAnomalies(result.anomalies);
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : '异常分析失败' });
+    }
+  },
+
+  loadAuditLogs: async (batchId: string) => {
+    try {
+      const logs = await getBatchAuditTimeline(batchId);
+      set({ auditLogs: logs });
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : '加载审计日志失败' });
+    }
+  },
+
+  loadExportSnapshots: async (batchId: string) => {
+    try {
+      const snapshots = await getExportSnapshots(batchId);
+      set({ exportSnapshots: snapshots });
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : '加载导出快照失败' });
+    }
+  },
+
+  recordAuditLog: async (params) => {
+    return createAuditLog(params);
+  },
+
+  getCurrentStatsSnapshot: () => {
+    const state = get();
+    const currentBatch = state.batches.find(b => b.id === state.currentBatchId);
+    const batchStats = currentBatch?.stats || {
+      totalSchedules: 0,
+      totalPunches: 0,
+      totalLeaves: 0,
+      totalAnomalies: 0,
+      pendingAnomalies: 0,
+      correctedAnomalies: 0,
+    };
+    return createStatsSnapshot(batchStats, state.anomalies);
+  },
+
+  createExportSnapshot: async (format: string, includeAuditSummary: boolean) => {
+    const state = get();
+    if (!state.currentBatchId) {
+      throw new Error('未选择批次');
+    }
+
+    const currentBatch = state.batches.find(b => b.id === state.currentBatchId);
+    if (!currentBatch) {
+      throw new Error('批次不存在');
+    }
+
+    const snapshot = await createExportSnapshot(
+      state.currentBatchId,
+      format,
+      includeAuditSummary,
+      state.anomalies,
+      state.corrections,
+      currentBatch.stats,
+      currentBatch.statsVersion,
+      state.auditLogs.length
+    );
+
+    await get().loadExportSnapshots(state.currentBatchId);
+    return snapshot;
+  },
+
+  checkRestoreConflicts: async (snapshotId: string) => {
+    return checkRestoreConflicts(snapshotId);
+  },
+
+  restoreToSnapshot: async (snapshotId: string, force: boolean = false) => {
+    const result = await restoreToSnapshot(snapshotId, force);
+    if (result.success) {
+      const state = get();
+      if (state.currentBatchId) {
+        await get().selectBatch(state.currentBatchId);
+        await get().loadAuditLogs(state.currentBatchId);
+        await get().loadExportSnapshots(state.currentBatchId);
+        await get().loadBatches();
+      }
+    }
+    return result;
+  },
+
+  incrementStatsVersion: async (batchId: string) => {
+    const currentVersion = await auditLogOperations.getLatestStatsVersion(batchId);
+    const newVersion = currentVersion + 1;
+    const batch = await batchOperations.getById(batchId);
+    if (batch) {
+      batch.statsVersion = newVersion;
+      await batchOperations.update(batch);
+      await get().loadBatches();
+    }
+    return newVersion;
+  },
 }));

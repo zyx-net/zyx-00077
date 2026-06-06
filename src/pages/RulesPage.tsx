@@ -22,6 +22,7 @@ import Modal from '@/components/Modal';
 import { useAppStore } from '@/store';
 import { useToast } from '@/contexts/ToastContext';
 import rulesModule from '@/modules/rules';
+import auditModule from '@/modules/audit';
 import type { RuleConfig, RuleVersion } from '@/types';
 
 interface EditableRule extends RuleConfig {
@@ -29,8 +30,18 @@ interface EditableRule extends RuleConfig {
 }
 
 export default function RulesPage() {
-  const { ruleVersions, activeRuleVersion, setActiveRuleVersion, loadRuleVersions, loading } =
-    useAppStore();
+  const {
+    ruleVersions,
+    activeRuleVersion,
+    setActiveRuleVersion,
+    loadRuleVersions,
+    loading,
+    currentBatchId,
+    recordAuditLog,
+    getCurrentStatsSnapshot,
+    analyzeAnomalies,
+    getCurrentBatch,
+  } = useAppStore();
   const { showToast } = useToast();
 
   const [localRules, setLocalRules] = useState<EditableRule[]>([]);
@@ -116,46 +127,154 @@ export default function RulesPage() {
       showToast('error', '请输入版本名称');
       return;
     }
+    if (!currentBatchId) {
+      showToast('warning', '请先选择一个批次');
+      return;
+    }
+
+    const statsBefore = getCurrentStatsSnapshot();
+    const oldVersion = activeRuleVersion;
+    let success = false;
+    let errorMessage: string | undefined;
+    let newVersion: import('../types').RuleVersion | null = null;
 
     setIsSaving(true);
     try {
       const rulesToSave = localRules.map(({ isEditing, ...rule }) => rule);
-      await rulesModule.createRuleVersion(
+      newVersion = await rulesModule.createRuleVersion(
         newVersionName.trim(),
         rulesToSave,
         newVersionDesc.trim()
       );
       await loadRuleVersions();
+      if (newVersion) {
+        await setActiveRuleVersion(newVersion.id);
+        await analyzeAnomalies();
+      }
       setShowSaveModal(false);
       setNewVersionName('');
       setNewVersionDesc('');
       setHasChanges(false);
-      showToast('success', '新版本保存成功');
+      showToast('success', '新版本保存成功并已激活');
+      success = true;
     } catch (error) {
-      showToast('error', '保存新版本失败');
+      errorMessage = error instanceof Error ? error.message : '保存新版本失败';
+      showToast('error', errorMessage);
     } finally {
       setIsSaving(false);
+      const statsAfter = getCurrentStatsSnapshot();
+      await recordAuditLog({
+        batchId: currentBatchId,
+        action: 'rule_switch',
+        description: `创建并激活新规则版本：${newVersionName.trim()}，描述：${newVersionDesc.trim() || '无'}`,
+        success,
+        errorMessage,
+        statsBefore,
+        statsAfter,
+        metadata: {
+          oldVersionId: oldVersion?.id,
+          oldVersionName: oldVersion?.name,
+          newVersionId: newVersion?.id,
+          newVersionName: newVersionName.trim(),
+          newVersionDesc: newVersionDesc.trim(),
+        },
+        linkedEntityIds: {
+          ruleVersionIds: newVersion ? [newVersion.id] : [],
+        },
+      });
     }
   };
 
   const handleRollback = async (versionId: string) => {
+    if (!currentBatchId) {
+      showToast('warning', '请先选择一个批次');
+      return;
+    }
     if (!confirm('确定要回滚到此版本吗？这将创建一个新的版本并激活它。')) return;
 
+    const statsBefore = getCurrentStatsSnapshot();
+    const oldVersion = activeRuleVersion;
+    const rollbackVersion = ruleVersions.find(v => v.id === versionId);
+    let success = false;
+    let errorMessage: string | undefined;
+    let newVersion: import('../types').RuleVersion | null = null;
+
     try {
-      await rulesModule.rollbackToVersion(versionId);
+      newVersion = await rulesModule.rollbackToVersion(versionId);
       await loadRuleVersions();
+      if (newVersion) {
+        await setActiveRuleVersion(newVersion.id);
+        await analyzeAnomalies();
+      }
       showToast('success', '回滚成功');
+      success = true;
     } catch (error) {
-      showToast('error', '回滚失败');
+      errorMessage = error instanceof Error ? error.message : '回滚失败';
+      showToast('error', errorMessage);
+    } finally {
+      const statsAfter = getCurrentStatsSnapshot();
+      await recordAuditLog({
+        batchId: currentBatchId,
+        action: 'rule_switch',
+        description: `回滚规则版本：从 ${oldVersion?.name || '无'} 回滚到 ${rollbackVersion?.name || versionId}（创建新版本）`,
+        success,
+        errorMessage,
+        statsBefore,
+        statsAfter,
+        metadata: {
+          oldVersionId: oldVersion?.id,
+          oldVersionName: oldVersion?.name,
+          rollbackFromVersionId: versionId,
+          rollbackFromVersionName: rollbackVersion?.name,
+          newVersionId: newVersion?.id,
+        },
+        linkedEntityIds: {
+          ruleVersionIds: newVersion ? [newVersion.id, versionId] : [versionId],
+        },
+      });
     }
   };
 
   const handleActivateVersion = async (versionId: string) => {
+    if (!currentBatchId) {
+      showToast('warning', '请先选择一个批次');
+      return;
+    }
+
+    const statsBefore = getCurrentStatsSnapshot();
+    const oldVersion = activeRuleVersion;
+    const newVersion = ruleVersions.find(v => v.id === versionId);
+    let success = false;
+    let errorMessage: string | undefined;
+
     try {
       await setActiveRuleVersion(versionId);
-      showToast('success', '版本已激活');
+      await analyzeAnomalies();
+      showToast('success', '版本已激活，异常已重新分析');
+      success = true;
     } catch (error) {
-      showToast('error', '激活失败');
+      errorMessage = error instanceof Error ? error.message : '激活失败';
+      showToast('error', errorMessage);
+    } finally {
+      const statsAfter = getCurrentStatsSnapshot();
+      await recordAuditLog({
+        batchId: currentBatchId,
+        action: 'rule_switch',
+        description: `切换规则版本：${oldVersion?.name || '无'} → ${newVersion?.name || versionId}`,
+        success,
+        errorMessage,
+        statsBefore,
+        statsAfter,
+        metadata: {
+          oldVersionId: oldVersion?.id,
+          oldVersionName: oldVersion?.name,
+          newVersionId: versionId,
+          newVersionName: newVersion?.name,
+        },
+        linkedEntityIds: {
+          ruleVersionIds: [versionId],
+        },
+      });
     }
   };
 

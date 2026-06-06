@@ -29,6 +29,7 @@ import AnomalyBadge from '@/components/AnomalyBadge';
 import { useAppStore } from '@/store';
 import { useToast } from '@/contexts/ToastContext';
 import correctionModule from '@/modules/correction';
+import auditModule from '@/modules/audit';
 import type { Anomaly, AnomalyType, Correction } from '@/types';
 import type { CorrectionType } from '@/modules/correction';
 
@@ -67,6 +68,8 @@ export default function AnomalyPage() {
     addCorrection,
     revertCorrection,
     loading,
+    recordAuditLog,
+    getCurrentStatsSnapshot,
   } = useAppStore();
   const { showToast } = useToast();
 
@@ -237,10 +240,14 @@ export default function AnomalyPage() {
   };
 
   const handleCorrect = async () => {
-    if (!selectedAnomaly || !correctionForm.reason.trim()) {
+    if (!selectedAnomaly || !correctionForm.reason.trim() || !currentBatchId) {
       showToast('error', '请填写修正原因');
       return;
     }
+
+    const statsBefore = getCurrentStatsSnapshot();
+    let success = false;
+    let errorMessage: string | undefined;
 
     try {
       let newValue: any = {};
@@ -269,41 +276,115 @@ export default function AnomalyPage() {
         await addCorrection(result.correction);
         setShowCorrectionModal(false);
         showToast('success', '异常修正成功');
+        success = true;
       } else {
         showToast('error', '修正失败');
+        errorMessage = '修正失败';
       }
     } catch (error) {
-      showToast('error', '修正失败');
+      errorMessage = error instanceof Error ? error.message : '修正失败';
+      showToast('error', errorMessage);
+    } finally {
+      const statsAfter = getCurrentStatsSnapshot();
+      await recordAuditLog({
+        batchId: currentBatchId,
+        action: 'correction',
+        description: `修正异常：${correctionModule.CORRECTION_TYPE_LABELS[correctionForm.type]}，原因：${correctionForm.reason}`,
+        success,
+        errorMessage,
+        statsBefore,
+        statsAfter,
+        metadata: {
+          correctionType: correctionForm.type,
+          reason: correctionForm.reason,
+        },
+        linkedEntityIds: {
+          anomalyIds: [selectedAnomaly.id],
+        },
+      });
     }
   };
 
   const handleIgnore = async (anomaly: Anomaly) => {
+    if (!currentBatchId) return;
+
+    const statsBefore = getCurrentStatsSnapshot();
+    let success = false;
+    let errorMessage: string | undefined;
+
     try {
       const result = await correctionModule.ignoreAnomaly(anomaly.id, '用户手动标记忽略');
       if (result.success && result.updatedAnomaly) {
         await updateAnomaly(result.updatedAnomaly);
         await addCorrection(result.correction);
         showToast('success', '已标记为忽略');
+        success = true;
       } else {
         showToast('error', '操作失败');
+        errorMessage = '操作失败';
       }
     } catch (error) {
-      showToast('error', '操作失败');
+      errorMessage = error instanceof Error ? error.message : '操作失败';
+      showToast('error', errorMessage);
+    } finally {
+      const statsAfter = getCurrentStatsSnapshot();
+      await recordAuditLog({
+        batchId: currentBatchId,
+        action: 'correction',
+        description: '标记异常为忽略，原因：用户手动标记忽略',
+        success,
+        errorMessage,
+        statsBefore,
+        statsAfter,
+        metadata: {
+          correctionType: 'ignore',
+          reason: '用户手动标记忽略',
+        },
+        linkedEntityIds: {
+          anomalyIds: [anomaly.id],
+        },
+      });
     }
   };
 
   const handleConfirm = async (anomaly: Anomaly) => {
+    if (!currentBatchId) return;
+
+    const statsBefore = getCurrentStatsSnapshot();
+    let success = false;
+    let errorMessage: string | undefined;
+
     try {
       const result = await correctionModule.confirmAnomaly(anomaly.id);
       if (result.success && result.updatedAnomaly) {
         await updateAnomaly(result.updatedAnomaly);
         await addCorrection(result.correction);
         showToast('success', '已确认异常');
+        success = true;
       } else {
         showToast('error', '操作失败');
+        errorMessage = '操作失败';
       }
     } catch (error) {
-      showToast('error', '操作失败');
+      errorMessage = error instanceof Error ? error.message : '操作失败';
+      showToast('error', errorMessage);
+    } finally {
+      const statsAfter = getCurrentStatsSnapshot();
+      await recordAuditLog({
+        batchId: currentBatchId,
+        action: 'correction',
+        description: '确认异常真实存在',
+        success,
+        errorMessage,
+        statsBefore,
+        statsAfter,
+        metadata: {
+          correctionType: 'confirm',
+        },
+        linkedEntityIds: {
+          anomalyIds: [anomaly.id],
+        },
+      });
     }
   };
 
@@ -316,31 +397,62 @@ export default function AnomalyPage() {
   };
 
   const handleRevert = async () => {
-    if (!revertingCorrection) return;
+    if (!revertingCorrection || !currentBatchId) return;
+
+    const statsBefore = getCurrentStatsSnapshot();
+    let success = false;
+    let errorMessage: string | undefined;
 
     try {
-      const success = await revertCorrection(revertingCorrection.id);
-      if (success) {
+      const result = await revertCorrection(revertingCorrection.id);
+      if (result) {
         setShowRevertModal(false);
         setRevertingCorrection(null);
         setSelectedAnomaly(null);
         showToast('success', '撤回成功，异常已恢复到修正前状态');
+        success = true;
       } else {
         showToast('error', '撤回失败');
+        errorMessage = '撤回失败';
       }
     } catch (error) {
-      showToast('error', '撤回失败');
+      errorMessage = error instanceof Error ? error.message : '撤回失败';
+      showToast('error', errorMessage);
+    } finally {
+      const statsAfter = getCurrentStatsSnapshot();
+      await recordAuditLog({
+        batchId: currentBatchId,
+        action: 'revert_correction',
+        description: `撤回修正，原因：${revertingCorrection.reason}`,
+        success,
+        errorMessage,
+        statsBefore,
+        statsAfter,
+        metadata: {
+          correctionId: revertingCorrection.id,
+          correctionType: revertingCorrection.type,
+        },
+        linkedEntityIds: {
+          anomalyIds: [revertingCorrection.anomalyId],
+          correctionIds: [revertingCorrection.id],
+        },
+      });
     }
   };
 
   const handleBatchCorrect = async () => {
-    if (selectedIds.size === 0) {
+    if (selectedIds.size === 0 || !currentBatchId) {
       showToast('warning', '请先选择要处理的异常');
       return;
     }
 
+    const statsBefore = getCurrentStatsSnapshot();
+    let success = false;
+    let errorMessage: string | undefined;
+    const anomalyIds = Array.from(selectedIds);
+    let updatedCount = 0;
+
     try {
-      const anomalyIds = Array.from(selectedIds);
       const results = await correctionModule.batchCorrect(
         anomalyIds,
         'mark_normal',
@@ -363,23 +475,51 @@ export default function AnomalyPage() {
         for (const correction of newCorrections) {
           await addCorrection(correction);
         }
+        updatedCount = updatedAnomalies.length;
+        success = true;
       }
 
       setSelectedIds(new Set());
       showToast('success', `批量修正 ${updatedAnomalies.length} 条异常`);
     } catch (error) {
-      showToast('error', '批量操作失败');
+      errorMessage = error instanceof Error ? error.message : '批量操作失败';
+      showToast('error', errorMessage);
+    } finally {
+      const statsAfter = getCurrentStatsSnapshot();
+      await recordAuditLog({
+        batchId: currentBatchId,
+        action: 'correction',
+        description: `批量修正 ${updatedCount} 条异常为正常，原因：批量标记为正常`,
+        success,
+        errorMessage,
+        statsBefore,
+        statsAfter,
+        metadata: {
+          correctionType: 'mark_normal',
+          reason: '批量标记为正常',
+          totalCount: anomalyIds.length,
+          successCount: updatedCount,
+        },
+        linkedEntityIds: {
+          anomalyIds,
+        },
+      });
     }
   };
 
   const handleBatchIgnore = async () => {
-    if (selectedIds.size === 0) {
+    if (selectedIds.size === 0 || !currentBatchId) {
       showToast('warning', '请先选择要处理的异常');
       return;
     }
 
+    const statsBefore = getCurrentStatsSnapshot();
+    let success = false;
+    let errorMessage: string | undefined;
+    const anomalyIds = Array.from(selectedIds);
+    let updatedCount = 0;
+
     try {
-      const anomalyIds = Array.from(selectedIds);
       const results = await correctionModule.batchCorrect(
         anomalyIds,
         'ignore',
@@ -402,12 +542,35 @@ export default function AnomalyPage() {
         for (const correction of newCorrections) {
           await addCorrection(correction);
         }
+        updatedCount = updatedAnomalies.length;
+        success = true;
       }
 
       setSelectedIds(new Set());
       showToast('success', `批量忽略 ${updatedAnomalies.length} 条异常`);
     } catch (error) {
-      showToast('error', '批量操作失败');
+      errorMessage = error instanceof Error ? error.message : '批量操作失败';
+      showToast('error', errorMessage);
+    } finally {
+      const statsAfter = getCurrentStatsSnapshot();
+      await recordAuditLog({
+        batchId: currentBatchId,
+        action: 'correction',
+        description: `批量忽略 ${updatedCount} 条异常，原因：批量忽略`,
+        success,
+        errorMessage,
+        statsBefore,
+        statsAfter,
+        metadata: {
+          correctionType: 'ignore',
+          reason: '批量忽略',
+          totalCount: anomalyIds.length,
+          successCount: updatedCount,
+        },
+        linkedEntityIds: {
+          anomalyIds,
+        },
+      });
     }
   };
 

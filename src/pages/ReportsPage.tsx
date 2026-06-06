@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
   FileBarChart,
   Download,
@@ -17,6 +17,8 @@ import {
   BarChart3,
   PieChart,
   X,
+  RotateCcw,
+  AlertCircle,
 } from 'lucide-react';
 import {
   PieChart as RechartsPie,
@@ -40,7 +42,8 @@ import { useAppStore } from '@/store';
 import { useToast } from '@/contexts/ToastContext';
 import exportModule from '@/modules/export';
 import statsModule from '@/modules/stats';
-import type { ExportOptions, ReportData, AnomalyType } from '@/types';
+import auditModule from '@/modules/audit';
+import type { ExportOptions, ReportData, AnomalyType, AuditExportSnapshot, RestoreCheckResult } from '@/types';
 
 const COLORS = ['#f97316', '#1e3a5f', '#10b981', '#ef4444', '#8b5cf6', '#06b6d4', '#f59e0b', '#ec4899'];
 
@@ -76,21 +79,72 @@ export default function ReportsPage() {
     batches,
     activeRuleVersion,
     schedules,
+    auditLogs,
+    exportSnapshots,
     loading,
+    loadAuditLogs,
+    loadExportSnapshots,
+    recordAuditLog,
+    getCurrentStatsSnapshot,
+    createExportSnapshot,
+    checkRestoreConflicts,
+    restoreToSnapshot,
   } = useAppStore();
   const { showToast } = useToast();
 
   const [exportFormat, setExportFormat] = useState<ExportOptions['format']>('html');
   const [includeCharts, setIncludeCharts] = useState(true);
   const [includeCorrections, setIncludeCorrections] = useState(true);
+  const [includeAuditSummary, setIncludeAuditSummary] = useState(false);
   const [reportTitle, setReportTitle] = useState('排班考勤异常对账分析报告');
   const [showPreview, setShowPreview] = useState(false);
   const [previewContent, setPreviewContent] = useState('');
   const [isExporting, setIsExporting] = useState(false);
-  const [activeTab, setActiveTab] = useState<'overview' | 'byType' | 'byDept' | 'byEmployee' | 'byDate'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'byType' | 'byDept' | 'byEmployee' | 'byDate' | 'audit' | 'snapshots'>('overview');
   const [historyReports, setHistoryReports] = useState<HistoryReport[]>([]);
+  const [showRestoreModal, setShowRestoreModal] = useState(false);
+  const [selectedSnapshot, setSelectedSnapshot] = useState<AuditExportSnapshot | null>(null);
+  const [restoreCheckResult, setRestoreCheckResult] = useState<RestoreCheckResult | null>(null);
+  const [isRestoring, setIsRestoring] = useState(false);
+  const [forceRestore, setForceRestore] = useState(false);
 
   const currentBatch = batches.find(b => b.id === currentBatchId);
+
+  useEffect(() => {
+    if (currentBatchId) {
+      loadAuditLogs(currentBatchId);
+      loadExportSnapshots(currentBatchId);
+    }
+  }, [currentBatchId, loadAuditLogs, loadExportSnapshots]);
+
+  const handleRestoreClick = async (snapshot: AuditExportSnapshot) => {
+    setSelectedSnapshot(snapshot);
+    setForceRestore(false);
+    const checkResult = await checkRestoreConflicts(snapshot.id);
+    setRestoreCheckResult(checkResult);
+    setShowRestoreModal(true);
+  };
+
+  const handleConfirmRestore = async () => {
+    if (!selectedSnapshot) return;
+    
+    setIsRestoring(true);
+    try {
+      const result = await restoreToSnapshot(selectedSnapshot.id, forceRestore);
+      if (result.success) {
+        showToast('success', result.message);
+        setShowRestoreModal(false);
+        setSelectedSnapshot(null);
+        setRestoreCheckResult(null);
+      } else {
+        showToast('error', result.message);
+      }
+    } catch (error) {
+      showToast('error', '恢复失败');
+    } finally {
+      setIsRestoring(false);
+    }
+  };
 
   const stats = useMemo(() => {
     if (!currentBatchId) return null;
@@ -171,17 +225,24 @@ export default function ReportsPage() {
   }, [stats]);
 
   const handleExport = async () => {
-    if (!reportData) {
+    if (!reportData || !currentBatchId) {
       showToast('error', '没有可导出的数据');
       return;
     }
 
+    const statsBefore = getCurrentStatsSnapshot();
     setIsExporting(true);
+    
+    let snapshotId: string | null = null;
+    let exportSuccess = false;
+    let errorMessage: string | undefined;
+
     try {
       const options: ExportOptions = {
         format: exportFormat,
         includeCharts,
         includeCorrections,
+        includeAuditSummary,
         title: reportTitle,
         generatedAt: new Date(),
       };
@@ -190,13 +251,23 @@ export default function ReportsPage() {
       let filename: string;
       const timestamp = new Date().toISOString().slice(0, 10);
 
+      const currentAuditLogs = includeAuditSummary ? auditLogs : [];
+
       switch (exportFormat) {
         case 'html':
           content = exportModule.generateHTMLReport(reportData, options);
+          if (includeAuditSummary && currentAuditLogs.length > 0) {
+            const auditSummary = auditModule.generateAuditSummaryHTML(currentAuditLogs, currentBatch?.name || '');
+            content = (content as string).replace('</body></html>', auditSummary + '</body></html>');
+          }
           filename = `考勤异常报告_${timestamp}.html`;
           break;
         case 'markdown':
           content = exportModule.generateMarkdownReport(reportData, options);
+          if (includeAuditSummary && currentAuditLogs.length > 0) {
+            const auditSummary = auditModule.generateAuditSummaryMarkdown(currentAuditLogs, currentBatch?.name || '');
+            content = (content as string) + '\n\n---\n\n' + auditSummary;
+          }
           filename = `考勤异常报告_${timestamp}.md`;
           break;
         case 'excel':
@@ -205,11 +276,18 @@ export default function ReportsPage() {
           break;
         case 'csv':
           content = exportModule.generateCSVReport(reportData, options);
+          if (includeAuditSummary && currentAuditLogs.length > 0) {
+            const auditSummary = auditModule.generateAuditSummaryCSV(currentAuditLogs);
+            content = (content as string) + '\n\n--- 审计摘要 ---\n' + auditSummary;
+          }
           filename = `考勤异常报告_${timestamp}.csv`;
           break;
         default:
           throw new Error('不支持的导出格式');
       }
+
+      const snapshot = await createExportSnapshot(exportFormat, includeAuditSummary);
+      snapshotId = snapshot.id;
 
       exportModule.downloadReport(content, filename, exportFormat);
 
@@ -229,10 +307,36 @@ export default function ReportsPage() {
         ...prev,
       ]);
 
+      exportSuccess = true;
       showToast('success', `报告已导出：${filename}`);
     } catch (error) {
-      showToast('error', '导出失败');
+      errorMessage = error instanceof Error ? error.message : '导出失败';
+      showToast('error', errorMessage);
     } finally {
+      const statsAfter = getCurrentStatsSnapshot();
+      
+      await recordAuditLog({
+        batchId: currentBatchId,
+        action: 'export',
+        description: `导出${exportFormat.toUpperCase()}报告：${reportTitle}${includeAuditSummary ? '（含审计摘要）' : ''}`,
+        success: exportSuccess,
+        errorMessage,
+        statsBefore,
+        statsAfter,
+        metadata: {
+          format: exportFormat,
+          includeCharts,
+          includeCorrections,
+          includeAuditSummary,
+          title: reportTitle,
+        },
+        linkedEntityIds: {
+          exportId: snapshotId || undefined,
+          anomalyIds: anomalies.slice(0, 100).map(a => a.id),
+          correctionIds: corrections.slice(0, 100).map(c => c.id),
+        },
+      });
+
       setIsExporting(false);
     }
   };
@@ -330,6 +434,8 @@ export default function ReportsPage() {
               { key: 'byDept', label: '按部门', icon: Building2 },
               { key: 'byEmployee', label: '按员工', icon: Users },
               { key: 'byDate', label: '按日期', icon: Calendar },
+              { key: 'audit', label: '审计时间线', icon: History },
+              { key: 'snapshots', label: '导出快照', icon: Clock },
             ].map(tab => (
               <button
                 key={tab.key}
@@ -623,6 +729,147 @@ export default function ReportsPage() {
                 })}
               </div>
             )}
+
+            {activeTab === 'audit' && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between mb-4">
+                  <h4 className="font-medium text-slate-800 flex items-center gap-2">
+                    <History size={18} />
+                    审计时间线
+                  </h4>
+                  <span className="text-sm text-slate-500">
+                    共 {auditLogs.length} 条记录
+                  </span>
+                </div>
+                {auditLogs.length === 0 ? (
+                  <div className="text-center py-12 text-slate-500">
+                    <Clock size={48} className="mx-auto mb-4 opacity-50" />
+                    <p>暂无审计记录</p>
+                  </div>
+                ) : (
+                  <div className="relative">
+                    <div className="absolute left-4 top-0 bottom-0 w-0.5 bg-slate-200"></div>
+                    {auditLogs.slice(0, 100).map((log, index) => (
+                      <div key={log.id} className="relative pl-12 pb-6">
+                        <div className={`absolute left-2 w-5 h-5 rounded-full border-2 ${
+                          log.success ? 'bg-green-500 border-green-500' : 'bg-red-500 border-red-500'
+                        }`}></div>
+                        <div className="bg-slate-50 rounded-lg p-4">
+                          <div className="flex items-start justify-between mb-2">
+                            <div>
+                              <span className={`inline-block px-2 py-0.5 text-xs font-medium rounded ${
+                                log.success ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+                              }`}>
+                                {auditModule.ACTION_LABELS[log.action] || log.action}
+                              </span>
+                              <span className="ml-2 text-sm text-slate-600">
+                                {log.description}
+                              </span>
+                            </div>
+                            <span className="text-xs text-slate-500">
+                              {new Date(log.timestamp).toLocaleString()}
+                            </span>
+                          </div>
+                          <div className="text-xs text-slate-500 mb-2">
+                            操作人: {log.operator} · 统计版本: v{log.statsVersion}
+                          </div>
+                          <div className="grid grid-cols-3 gap-4 text-xs">
+                            <div>
+                              <span className="text-slate-500">异常总数:</span>
+                              <span className="ml-1 font-medium">
+                                {log.statsBefore.totalAnomalies} → {log.statsAfter.totalAnomalies}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-slate-500">待处理:</span>
+                              <span className="ml-1 font-medium">
+                                {log.statsBefore.pendingAnomalies} → {log.statsAfter.pendingAnomalies}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-slate-500">已修正:</span>
+                              <span className="ml-1 font-medium">
+                                {log.statsBefore.correctedAnomalies} → {log.statsAfter.correctedAnomalies}
+                              </span>
+                            </div>
+                          </div>
+                          {log.errorMessage && (
+                            <div className="mt-2 text-xs text-red-600 bg-red-50 px-2 py-1 rounded">
+                              <AlertCircle size={12} className="inline mr-1" />
+                              {log.errorMessage}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {activeTab === 'snapshots' && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between mb-4">
+                  <h4 className="font-medium text-slate-800 flex items-center gap-2">
+                    <Clock size={18} />
+                    导出快照
+                  </h4>
+                  <span className="text-sm text-slate-500">
+                    共 {exportSnapshots.length} 个快照
+                  </span>
+                </div>
+                {exportSnapshots.length === 0 ? (
+                  <div className="text-center py-12 text-slate-500">
+                    <History size={48} className="mx-auto mb-4 opacity-50" />
+                    <p>暂无导出快照</p>
+                    <p className="text-sm mt-2">导出报告时会自动创建快照，可用于恢复数据</p>
+                  </div>
+                ) : (
+                  <div className="table-container">
+                    <table className="table">
+                      <thead>
+                        <tr>
+                          <th>导出时间</th>
+                          <th>格式</th>
+                          <th>统计版本</th>
+                          <th>异常数</th>
+                          <th>修正数</th>
+                          <th>审计记录</th>
+                          <th>操作</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {exportSnapshots.map((snapshot) => (
+                          <tr key={snapshot.id}>
+                            <td className="font-medium">
+                              {new Date(snapshot.timestamp).toLocaleString()}
+                            </td>
+                            <td>
+                              <span className="badge badge-info">
+                                {snapshot.format.toUpperCase()}
+                              </span>
+                            </td>
+                            <td>v{snapshot.statsVersion}</td>
+                            <td>{snapshot.batchStats.totalAnomalies}</td>
+                            <td>{snapshot.corrections.length}</td>
+                            <td>{snapshot.auditLogCount}</td>
+                            <td>
+                              <button
+                                className="btn-sm btn-secondary"
+                                onClick={() => handleRestoreClick(snapshot)}
+                              >
+                                <RotateCcw size={14} className="inline mr-1" />
+                                恢复
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -715,6 +962,15 @@ export default function ReportsPage() {
                     className="w-4 h-4 text-[#1e3a5f] rounded"
                   />
                   <span className="text-sm text-slate-700">包含修正记录</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={includeAuditSummary}
+                    onChange={e => setIncludeAuditSummary(e.target.checked)}
+                    className="w-4 h-4 text-[#1e3a5f] rounded"
+                  />
+                  <span className="text-sm text-slate-700">包含审计摘要</span>
                 </label>
               </div>
             </div>
@@ -832,6 +1088,116 @@ export default function ReportsPage() {
             title="报告预览"
           />
         </div>
+      </Modal>
+
+      <Modal
+        isOpen={showRestoreModal}
+        onClose={() => setShowRestoreModal(false)}
+        title="确认恢复数据"
+        size="lg"
+        footer={
+          <>
+            <button className="btn-secondary" onClick={() => setShowRestoreModal(false)}>
+              <X size={16} className="inline mr-1" />
+              取消
+            </button>
+            <button
+              className="btn-primary"
+              onClick={handleConfirmRestore}
+              disabled={isRestoring || (!restoreCheckResult?.canRestore && !forceRestore)}
+            >
+              {isRestoring ? (
+                <>
+                  <Loading size="sm" />
+                  <span className="ml-2">恢复中...</span>
+                </>
+              ) : (
+                <>
+                  <RotateCcw size={16} className="inline mr-1" />
+                  {forceRestore ? '强制恢复' : '确认恢复'}
+                </>
+              )}
+            </button>
+          </>
+        }
+      >
+        {selectedSnapshot && (
+          <div className="space-y-4">
+            <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg">
+              <div className="flex items-start gap-3">
+                <AlertTriangle size={20} className="text-amber-600 mt-0.5 flex-shrink-0" />
+                <div>
+                  <h5 className="font-medium text-amber-800">恢复操作不可逆</h5>
+                  <p className="text-sm text-amber-700 mt-1">
+                    此操作将把当前批次的数据恢复到 {selectedSnapshot.format.toUpperCase()} 报告导出时的状态。
+                    当前所有未包含在快照中的异常和修正记录将被删除。
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="p-4 bg-slate-50 rounded-lg">
+                <div className="text-sm text-slate-500 mb-1">快照信息</div>
+                <div className="font-medium">
+                  {new Date(selectedSnapshot.timestamp).toLocaleString()}
+                </div>
+                <div className="text-sm text-slate-600 mt-1">
+                  格式: {selectedSnapshot.format.toUpperCase()} · 版本: v{selectedSnapshot.statsVersion}
+                </div>
+              </div>
+              <div className="p-4 bg-slate-50 rounded-lg">
+                <div className="text-sm text-slate-500 mb-1">快照数据</div>
+                <div className="font-medium">
+                  {selectedSnapshot.batchStats.totalAnomalies} 条异常
+                </div>
+                <div className="text-sm text-slate-600 mt-1">
+                  {selectedSnapshot.corrections.length} 条修正 · {selectedSnapshot.auditLogCount} 条审计
+                </div>
+              </div>
+            </div>
+
+            {restoreCheckResult && restoreCheckResult.conflicts.length > 0 && (
+              <div className="space-y-2">
+                <h5 className="font-medium text-red-700 flex items-center gap-2">
+                  <AlertCircle size={16} />
+                  检测到 {restoreCheckResult.conflicts.length} 个冲突
+                </h5>
+                <div className="space-y-2">
+                  {restoreCheckResult.conflicts.map((conflict, idx) => (
+                    <div key={idx} className="p-3 bg-red-50 border border-red-200 rounded-lg">
+                      <div className="text-sm font-medium text-red-800">
+                        {conflict.message}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <label className="flex items-center gap-2 cursor-pointer pt-2">
+                  <input
+                    type="checkbox"
+                    checked={forceRestore}
+                    onChange={e => setForceRestore(e.target.checked)}
+                    className="w-4 h-4 text-red-600 rounded"
+                  />
+                  <span className="text-sm text-red-700 font-medium">
+                    我已了解风险，确认强制恢复（将覆盖当前数据）
+                  </span>
+                </label>
+              </div>
+            )}
+
+            {restoreCheckResult && restoreCheckResult.canRestore && (
+              <div className="p-4 bg-green-50 border border-green-200 rounded-lg">
+                <div className="flex items-center gap-2">
+                  <CheckCircle size={20} className="text-green-600" />
+                  <span className="text-green-800 font-medium">
+                    未检测到冲突，可以安全恢复
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </Modal>
     </Layout>
   );

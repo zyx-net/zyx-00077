@@ -264,8 +264,9 @@ export default function AnomalyPage() {
         correctionForm.reason
       );
 
-      if (result.success && result.updatedAnomaly) {
+      if (result.success && result.updatedAnomaly && result.correction) {
         await updateAnomaly(result.updatedAnomaly);
+        await addCorrection(result.correction);
         setShowCorrectionModal(false);
         showToast('success', '异常修正成功');
       } else {
@@ -339,17 +340,33 @@ export default function AnomalyPage() {
     }
 
     try {
-      const updated = anomalies
-        .filter(a => selectedIds.has(a.id))
-        .map(a => ({
-          ...a,
-          status: 'corrected' as const,
-          correctedAt: new Date(),
-        }));
+      const anomalyIds = Array.from(selectedIds);
+      const results = await correctionModule.batchCorrect(
+        anomalyIds,
+        'mark_normal',
+        {},
+        '批量标记为正常'
+      );
 
-      await updateAnomalies(updated);
+      const updatedAnomalies: Anomaly[] = [];
+      const newCorrections: Correction[] = [];
+
+      for (const result of results) {
+        if (result.success && result.updatedAnomaly && result.correction) {
+          updatedAnomalies.push(result.updatedAnomaly);
+          newCorrections.push(result.correction);
+        }
+      }
+
+      if (updatedAnomalies.length > 0) {
+        await updateAnomalies(updatedAnomalies);
+        for (const correction of newCorrections) {
+          await addCorrection(correction);
+        }
+      }
+
       setSelectedIds(new Set());
-      showToast('success', `批量修正 ${updated.length} 条异常`);
+      showToast('success', `批量修正 ${updatedAnomalies.length} 条异常`);
     } catch (error) {
       showToast('error', '批量操作失败');
     }
@@ -362,17 +379,33 @@ export default function AnomalyPage() {
     }
 
     try {
-      const updated = anomalies
-        .filter(a => selectedIds.has(a.id))
-        .map(a => ({
-          ...a,
-          status: 'ignored' as const,
-          correctedAt: new Date(),
-        }));
+      const anomalyIds = Array.from(selectedIds);
+      const results = await correctionModule.batchCorrect(
+        anomalyIds,
+        'ignore',
+        {},
+        '批量忽略'
+      );
 
-      await updateAnomalies(updated);
+      const updatedAnomalies: Anomaly[] = [];
+      const newCorrections: Correction[] = [];
+
+      for (const result of results) {
+        if (result.success && result.updatedAnomaly && result.correction) {
+          updatedAnomalies.push(result.updatedAnomaly);
+          newCorrections.push(result.correction);
+        }
+      }
+
+      if (updatedAnomalies.length > 0) {
+        await updateAnomalies(updatedAnomalies);
+        for (const correction of newCorrections) {
+          await addCorrection(correction);
+        }
+      }
+
       setSelectedIds(new Set());
-      showToast('success', `批量忽略 ${updated.length} 条异常`);
+      showToast('success', `批量忽略 ${updatedAnomalies.length} 条异常`);
     } catch (error) {
       showToast('error', '批量操作失败');
     }

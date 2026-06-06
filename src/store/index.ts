@@ -294,9 +294,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   addCorrection: async (correction: Correction) => {
     try {
-      await correctionOperations.add(correction);
       set(state => ({
-        corrections: [...state.corrections, correction],
+        corrections: state.corrections.some(c => c.id === correction.id)
+          ? state.corrections
+          : [...state.corrections, correction],
       }));
     } catch (error) {
       set({ error: error instanceof Error ? error.message : '保存修正记录失败' });

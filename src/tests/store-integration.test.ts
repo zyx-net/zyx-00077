@@ -2,11 +2,11 @@ import 'fake-indexeddb/auto';
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { initDB, clearDB, anomalyOperations, correctionOperations, batchOperations, scheduleOperations, punchOperations } from '../db';
-import { correctAnomaly, revertCorrection } from '../modules/correction';
+import { correctAnomaly, revertCorrection, correctionModule } from '../modules/correction';
 import { useAppStore } from '../store';
 import { calculateSummary } from '../modules/stats';
 import { generateId, parseDateTime } from '../utils/dateUtils';
-import type { Anomaly, ScheduleRecord, PunchRecord, Batch } from '../types';
+import type { Anomaly, ScheduleRecord, PunchRecord, Batch, Correction } from '../types';
 
 describe('Store 集成测试 - 状态同步验证', () => {
   let testBatchId: string;
@@ -278,5 +278,139 @@ describe('Store 集成测试 - 状态同步验证', () => {
     assert.equal(mainState.anomalies.length, 2);
 
     console.log('✅ 批次隔离验证通过：不同批次数据互不影响');
+  });
+
+  it('刚修正后立即撤回：corrections 状态同步，无需重新加载', async () => {
+    const state = useAppStore.getState();
+    await state.selectBatch(testBatchId);
+
+    const initialAnomalies = useAppStore.getState().anomalies;
+    const anomalyToCorrect = initialAnomalies.find(a => a.status === 'pending');
+    if (!anomalyToCorrect) {
+      console.log('⚠️  没有待处理异常，跳过此测试');
+      return;
+    }
+
+    const initialCorrectionsCount = useAppStore.getState().corrections.length;
+    const initialPendingCount = useAppStore.getState().anomalies.filter(a => a.status === 'pending').length;
+
+    console.log(`✅ 初始状态：${initialPendingCount}个待处理，${initialCorrectionsCount}条修正记录`);
+
+    const result = await correctionModule.correctAnomaly(
+      anomalyToCorrect.id,
+      'mark_normal',
+      {},
+      '测试修正后立即撤回'
+    );
+
+    assert.ok(result.success);
+    assert.ok(result.updatedAnomaly);
+    assert.ok(result.correction);
+
+    await state.updateAnomaly(result.updatedAnomaly);
+    await state.addCorrection(result.correction);
+
+    let s2 = useAppStore.getState();
+    const afterPendingCount = s2.anomalies.filter(a => a.status === 'pending').length;
+    const afterCorrectedCount = s2.anomalies.filter(a => a.status === 'corrected').length;
+    const afterCorrectionsCount = s2.corrections.length;
+
+    assert.equal(afterPendingCount, initialPendingCount - 1);
+    assert.equal(afterCorrectedCount, 1);
+    assert.equal(afterCorrectionsCount, initialCorrectionsCount + 1);
+    assert.ok(result.updatedAnomaly.correctionId, '异常应该有 correctionId');
+    assert.equal(
+      s2.corrections.find(c => c.id === result.correction!.id)?.id,
+      result.correction.id,
+      'corrections 数组应包含最新记录'
+    );
+    console.log(`✅ 修正后状态正确：${afterPendingCount}个待处理，${afterCorrectedCount}个已修正，${afterCorrectionsCount}条修正记录`);
+
+    const foundCorrection = s2.corrections.find(c => c.id === result.updatedAnomaly!.correctionId);
+    assert.ok(foundCorrection, '应该能从 corrections 数组中找到最新记录，无需重新加载');
+    console.log(`✅ 立即查找验证：无需重新加载即可找到最新修正记录`);
+
+    const revertSuccess = await state.revertCorrection(result.correction.id);
+    assert.ok(revertSuccess, '刚修正后立即撤回应该成功');
+
+    let s3 = useAppStore.getState();
+    const revertPendingCount = s3.anomalies.filter(a => a.status === 'pending').length;
+    const revertCorrectedCount = s3.anomalies.filter(a => a.status === 'corrected').length;
+    assert.equal(revertPendingCount, initialPendingCount);
+    assert.equal(revertCorrectedCount, 0);
+    assert.equal(s3.corrections.length, initialCorrectionsCount + 1, '撤回后历史记录仍保留');
+    console.log(`✅ 撤回成功：${revertPendingCount}个待处理，${revertCorrectedCount}个已修正，历史记录保留`);
+  });
+
+  it('批量修正后立即批量撤回：状态同步验证', async () => {
+    const state = useAppStore.getState();
+    await state.selectBatch(testBatchId);
+
+    const initialAnomalies = useAppStore.getState().anomalies;
+    const pendingAnomalies = initialAnomalies.filter(a => a.status === 'pending');
+
+    if (pendingAnomalies.length < 2) {
+      console.log('⚠️  待处理异常不足2个，跳过此测试');
+      return;
+    }
+
+    const anomalyIds = pendingAnomalies.slice(0, 2).map(a => a.id);
+    const initialCorrectionsCount = useAppStore.getState().corrections.length;
+    const initialPendingCount = pendingAnomalies.length;
+
+    console.log(`✅ 初始状态：${initialPendingCount}个待处理，${initialCorrectionsCount}条历史记录`);
+
+    const results = await correctionModule.batchCorrect(
+      anomalyIds,
+      'confirm',
+      {},
+      '批量确认异常'
+    );
+
+    const updatedAnomalies: Anomaly[] = [];
+    const newCorrections: Correction[] = [];
+
+    for (const r of results) {
+      if (r.success && r.updatedAnomaly && r.correction) {
+        updatedAnomalies.push(r.updatedAnomaly);
+        newCorrections.push(r.correction);
+      }
+    }
+
+    assert.equal(updatedAnomalies.length, 2);
+    assert.equal(newCorrections.length, 2);
+
+    await state.updateAnomalies(updatedAnomalies);
+    for (const c of newCorrections) {
+      await state.addCorrection(c);
+    }
+
+    let s2 = useAppStore.getState();
+    const afterConfirmedCount = s2.anomalies.filter(a => a.status === 'confirmed').length;
+    const afterPendingCount = s2.anomalies.filter(a => a.status === 'pending').length;
+    const afterCorrectionsCount = s2.corrections.length;
+
+    assert.equal(afterConfirmedCount, 2);
+    assert.equal(afterPendingCount, initialPendingCount - 2);
+    assert.equal(afterCorrectionsCount, initialCorrectionsCount + 2);
+    console.log(`✅ 批量修正后：${afterConfirmedCount}个已确认，${afterPendingCount}个待处理，共${afterCorrectionsCount}条记录`);
+
+    for (const anomaly of updatedAnomalies) {
+      const found = s2.corrections.find(c => c.id === anomaly.correctionId);
+      assert.ok(found, `批量修正后 ${anomaly.id} 应该能立即找到对应修正记录`);
+    }
+    console.log(`✅ 批量修正后所有异常都能立即找到修正记录`);
+
+    for (const c of newCorrections) {
+      await state.revertCorrection(c.id);
+    }
+
+    let s3 = useAppStore.getState();
+    const finalPendingCount = s3.anomalies.filter(a => a.status === 'pending').length;
+    const finalConfirmedCount = s3.anomalies.filter(a => a.status === 'confirmed').length;
+    assert.equal(finalPendingCount, initialPendingCount);
+    assert.equal(finalConfirmedCount, 0);
+    assert.equal(s3.corrections.length, initialCorrectionsCount + 2, '所有历史记录保留');
+    console.log(`✅ 批量撤回后：${finalPendingCount}个待处理，${finalConfirmedCount}个已确认，共${s3.corrections.length}条历史记录`);
   });
 });
